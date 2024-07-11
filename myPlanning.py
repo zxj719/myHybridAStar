@@ -37,7 +37,7 @@ CAR_MAX_STEER = math.radians(30)   # 最大转角 (rad)
 CAR_MAX_SPEED = 8                  # 最大速度 (m/s)
 
 
-# 定义运动模型
+# define
 def motion_model(s, u, dt):
     """
     >>> u = [v, δ]
