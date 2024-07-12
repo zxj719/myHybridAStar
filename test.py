@@ -1,63 +1,36 @@
-class Map:
+import numpy as np
+import math
+import sys
+import os
+import heapq
+import numpy as np
+import matplotlib.pyplot as plt
+from heapdict import heapdict
+import scipy.spatial as kd
+import reeds_shepp as rsCurve
+from dataclasses import dataclass
 
-    xyResolution: int = 4     # grid block length
-    yawResolution: float =15.0 # grid block possible yaws
+class Car:
+    maxSteerAngle = 0.6
+    steerPresion = 10
+    wheelBase = 3.5
+    axleToFront = 4.5
+    axleToBack = 1
+    width = 3
+    motion_commands = None
 
-    def __init__(self) -> None:
-        # Build Map
-        self.obstacleX, self.obstacleY = [], []
-        for i in range(51):
-            self.obstacleX.append(i)
-            self.obstacleY.append(0)
+    @classmethod
+    def set_motion_commands(cls):
+        """Define motion commands"""
+        # Motion commands for a Non-Holonomic Robot like a Car (Trajectories using Steer Angle and Direction)
+        direction = 1
+        motion_commands = []
+        for i in np.arange(cls.maxSteerAngle, -(cls.maxSteerAngle + cls.maxSteerAngle/cls.steerPresion), -cls.maxSteerAngle/cls.steerPresion):
+            motion_commands.append([i, direction])
+            motion_commands.append([i, -direction])
+        cls.motion_commands = motion_commands
 
-        for i in range(51):
-            self.obstacleX.append(0)
-            self.obstacleY.append(i)
+Car.set_motion_commands()
 
-        for i in range(51):
-            self.obstacleX.append(i)
-            self.obstacleY.append(50)
-
-        for i in range(51):
-            self.obstacleX.append(50)
-            self.obstacleY.append(i)
-        
-        for i in range(6,20):
-            self.obstacleX.append(i)
-            self.obstacleY.append(30)
-
-        for i in range(30,51):
-            self.obstacleX.append(i)
-            self.obstacleY.append(30) 
-
-        for i in range(0,31):
-            self.obstacleX.append(20)
-            self.obstacleY.append(i) 
-
-        for i in range(0,31):
-            self.obstacleX.append(30)
-            self.obstacleY.append(i) 
-
-        for i in range(40,50):
-            self.obstacleX.append(15)
-            self.obstacleY.append(i)
-
-        for i in range(25,40):
-            self.obstacleX.append(i)
-            self.obstacleY.append(35)
-
-        # calculate min max map grid index based on obstacles in map
-        self.mapMinX, self.mapMinY = self.grid_idx(min(self.obstacleX), min(self.obstacleY))
-        self.mapMaxX = round(max(self.obstacleX) / self.xyResolution)
-        self.mapMaxY = round(max(self.obstacleY) / self.xyResolution)
-
-        # create a KDTree to represent obstacles
-        # self.ObstacleKDTree = kd.KDTree([[x, y] for x, y in zip(self.obstacleX, self.obstacleY)])
-
-    @staticmethod
-    def grid_idx(*pos):
-        """Calculate (x,y) --> map grid index (x_idx, y_idx)"""
-        return (round(pos[0] / Map.xyResolution), round(pos[1] / Map.xyResolution))
-
-mapParameters = Map()
-print(mapParameters.mapMinY)
+for i,j in Car.motion_commands:
+    print(i,j)

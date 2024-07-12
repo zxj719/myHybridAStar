@@ -5,9 +5,10 @@ import heapq
 import numpy as np
 import matplotlib.pyplot as plt
 from heapdict import heapdict
-import scipy.spatial.kdtree as kd
+import scipy.spatial as kd
 import reeds_shepp as rsCurve
 from dataclasses import dataclass
+from common import SetQueue, GridMap, tic, toc, limit_angle
 
 class Car:
     maxSteerAngle = 0.6
@@ -16,6 +17,20 @@ class Car:
     axleToFront = 4.5
     axleToBack = 1
     width = 3
+    motion_commands = None
+
+    @classmethod
+    def set_motion_commands(cls):
+        """Define motion commands"""
+        # Motion commands for a Non-Holonomic Robot like a Car (Trajectories using Steer Angle and Direction)
+        direction = 1
+        motion_commands = []
+        for i in np.arange(cls.maxSteerAngle, -(cls.maxSteerAngle + cls.maxSteerAngle/cls.steerPresion), -cls.maxSteerAngle/cls.steerPresion):
+            motion_commands.append([i, direction])
+            motion_commands.append([i, -direction])
+        cls.motion_commands = motion_commands
+
+Car.set_motion_commands()
 
 class Cost:
     reverse = 10
@@ -26,7 +41,7 @@ class Cost:
 
 class Map:
 
-    xyResolution: int = 4     # grid block length
+    xyResolution: int = 1     # grid block length
     yawResolution: float = np.deg2rad(15.0)  # grid block possible yaws
     s = [10, 10, np.deg2rad(90)]
     g = [25, 10, np.deg2rad(-90)]
@@ -94,37 +109,29 @@ class Map:
 
 map = Map()
 
-class Node:
-    def __init__(self, gridIndex, traj, steeringAngle, direction, cost, parentIndex):
-        self.gridIndex = gridIndex         # grid block x, y, yaw index
-        self.traj = traj                   # trajectory x, y  of a simulated node
-        self.steeringAngle = steeringAngle # steering angle throughout the trajectory
-        self.direction = direction         # direction throughout the trajectory
-        self.cost = cost                   # node cost
-        self.parentIndex = parentIndex     # parent node index
-
-# 坐标节点
 @dataclass(eq=False)
 class Node:
     x: float
     y: float
-    angle: float
-    dir: int
+    yaw: float
+    parent: "Node" = None # 父节点指针
+    dir: int = 1
+    angle: float = 0
     G: float = 0.        # G代价
     cost: float = None   # F代价 = G + H
-    parent: Node = None # 父节点指针
-
+    
     def __post_init__(self):
         # Grid index
-        self.x_idx, self.y_idx, self.yaw_idx= Map.config_idx(self.x, self.y, self.angle)
+        self.x_idx, self.y_idx, self.yaw_idx= Map.config_idx(self.x, self.y, self.yaw)
         if self.cost is None:
-            self.cost = self.heuristic([self.x, self.y], [map.g[0], map.g[1]])
+            self.cost = self.heuristic([self.x, self.y], map.g)
     
-    def __call__(self, u, dt):
-        # 生成新节点 -> new_node = node(u, dt)
-        x, y, yaw = motion_model([self.x, self.y, self.angle], u, dt)
-        G = self.G + self.heuristic([self.x, self.y], [x, y]) + abs(yaw - self.yaw)
-        return Node(x, y, yaw, G, parent=self)
+    def __call__(self, command):
+        # Iterate next node
+        x, y, yaw = self.kinematic_simulate(command)
+        angle, dir = command
+        G = self.G + self.heuristic([self.x, self.y], [x, y]) + self.simulatedPathCost(command)
+        return Node(x, y, yaw, parent=self, dir=dir, angle=angle, G=G)
         
     def __eq__(self, other: "Node"):
         # 节点eq比较 -> node in list
@@ -143,47 +150,37 @@ class Node:
         # 节点hash比较 -> node in set
         return hash((self.x_idx, self.y_idx, self.yaw_idx))
        
-    def heuristic(self, TARG = END):
+    def update_cost(self, TARG = map.g):
         """启发搜索, 计算启发值H并更新F值"""
         H = self.heuristic([self.x, self.y], TARG)
         self.cost = self.G + H
         return H
 
-    def is_end(self, err = ERR):
+    def is_end(self, err = 0.05):
         """是否终点, 启发值H小于err"""
         if self.cost - self.G < err:
             return True
         return False
     
-    def in_map(self, map_array = MAP.map_array):
+    def in_map(self):
         """是否在地图中"""
-        return (0 <= self.x < map_array.shape[1]) and (0 <= self.y < map_array.shape[0]) # h*w维, 右边不能取等!!!
+        return (0 <= self.x < max(map.obstacleX)) and (0 <= self.y < max(map.obstacleY))
 
-    def is_collided(self, map_array = MAP.map_array):
-        """是否发生碰撞"""
-        # 计算车辆的边界框的四个顶点坐标
+    def is_collided(self):
         cos_ = math.cos(self.yaw)
         sin_ = math.sin(self.yaw)
-        LC = CAR_LENGTH/2 * cos_
-        LS = CAR_LENGTH/2 * sin_
-        WC = CAR_WIDTH/2 * cos_
-        WS = CAR_WIDTH/2 * sin_
-        x1 = self.x + LC + WS
-        y1 = self.y - LS + WC
-        x2 = self.x + LC - WS
-        y2 = self.y - LS - WC
-        x3 = self.x - LC + WS
-        y3 = self.y + LS + WC
-        x4 = self.x - LC - WS
-        y4 = self.y + LS - WC
-        # 检查边界框所覆盖的栅格是否包含障碍物和出界
-        for i in range(int(min([x1, x2, x3, x4])/MAP_NORM), int(max([x1, x2, x3, x4])/MAP_NORM)):
-            for j in range(int(min([y1, y2, y3, y4])/MAP_NORM), int(max([y1, y2, y3, y4])/MAP_NORM)):
-                if i < 0 or i >= map_array.shape[1]:
-                    return True
-                if j < 0 or j >= map_array.shape[0]:
-                    return True
-                if map_array[j, i] == 0: # h*w维, y是第一个索引, 0表示障碍物
+        car_len = (Car.axleToFront + Car.axleToBack)/2 + 1
+        dl = (Car.axleToFront - Car.axleToBack)/2
+        cx = self.x + dl * cos_
+        cy = self.y + dl * sin_
+        pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], car_len)
+        if pointsInObstacle:
+            for p in pointsInObstacle:
+                xo = map.obstacleX[p] - cx
+                yo = map.obstacleY[p] - cy
+                dx = xo * cos_ + yo * sin_
+                dy = -xo * sin_ + yo * cos_
+                if abs(dx) < car_len and abs(dy) < Car.width / 2 + 1:
                     return True
         return False
         
@@ -191,55 +188,35 @@ class Node:
     def heuristic(P1, P2):
         """Euclid Distance"""
         return math.hypot(P1[0] - P2[0], P1[1] - P2[1])
+    
+    @staticmethod
+    def wrap_angle(angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+    
+    def kinematic_simulate(self, motionCommand, step=0.8):
+        # Simulate node using given current Node and Motion Commands
+        x = self.x + motionCommand[1] * step * math.cos(self.yaw)
+        y = self.y + motionCommand[1] * step * math.sin(self.yaw)
+        yaw = self.wrap_angle(self.yaw + motionCommand[1] * step / Car.wheelBase * math.tan(motionCommand[0]))
+        return x, y, yaw
+    
+    def simulatedPathCost(self, motionCommand):
+        cost = 0
+        # Distance cost
+        if motionCommand[1] == 1:
+            cost += 1
+        else:
+            cost += Cost.reverse
+        # Direction change cost
+        if self.dir != motionCommand[1]:
+            cost += Cost.directionChange
+        # Steering Angle Cost
+        cost += motionCommand[0] * Cost.steerAngle
+        # Steering Angle change cost
+        cost += abs(motionCommand[0] - self.angle) * Cost.steerAngleChange
+        return cost
 
-class HolonomicNode:
-    def __init__(self, gridIndex, cost, parentIndex):
-        self.gridIndex = gridIndex
-        self.cost = cost
-        self.parentIndex = parentIndex
 
-
-def index(Node):
-    # Index is a tuple consisting grid index, used for checking if two nodes are near/same
-    return tuple([Node.gridIndex[0], Node.gridIndex[1], Node.gridIndex[2]])
-
-def motionCommands():
-    # Motion commands for a Non-Holonomic Robot like a Car or Bicycle (Trajectories using Steer Angle and Direction)
-    direction = 1
-    motionCommand = []
-    for i in np.arange(Car.maxSteerAngle, -(Car.maxSteerAngle + Car.maxSteerAngle/Car.steerPresion), -Car.maxSteerAngle/Car.steerPresion):
-        motionCommand.append([i, direction])
-        motionCommand.append([i, -direction])
-    return motionCommand
-
-def holonomicMotionCommands():
-    # Action set for a Point/Omni-Directional/Holonomic Robot (8-Directions)
-    holonomicMotionCommand = [[-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0], [1, -1], [0, -1], [-1, -1]]
-    return holonomicMotionCommand
-
-def kinematicSimulationNode(currentNode, motionCommand, map, simulationLength=4, step = 0.8 ):
-    # Simulate node using given current Node and Motion Commands
-    traj = []
-    angle = rsCurve.pi_2_pi(currentNode.traj[-1][2] + motionCommand[1] * step / Car.wheelBase * math.tan(motionCommand[0]))
-    traj.append([currentNode.traj[-1][0] + motionCommand[1] * step * math.cos(angle),
-                currentNode.traj[-1][1] + motionCommand[1] * step * math.sin(angle),
-                rsCurve.pi_2_pi(angle + motionCommand[1] * step / Car.wheelBase * math.tan(motionCommand[0]))])
-    for i in range(int((simulationLength/step))-1):
-        traj.append([traj[i][0] + motionCommand[1] * step * math.cos(traj[i][2]),
-                    traj[i][1] + motionCommand[1] * step * math.sin(traj[i][2]),
-                    rsCurve.pi_2_pi(traj[i][2] + motionCommand[1] * step / Car.wheelBase * math.tan(motionCommand[0]))])
-
-    # Find grid index
-    gridIndex = [round(traj[-1][0]/map.xyResolution), round(traj[-1][1]/map.xyResolution), round(traj[-1][2]/map.yawResolution)]
-
-    # Check if node is valid
-    if not isValid(traj, gridIndex, map):
-        return None
-
-    # Calculate Cost of the node
-    cost = simulatedPathCost(currentNode, motionCommand, simulationLength)
-
-    return Node(gridIndex, traj, motionCommand[0], motionCommand[1], cost, index(currentNode))
 
 def reedsSheppNode(currentNode, goalNode, map):
     # Get x, y, yaw of currentNode and goalNode
@@ -270,38 +247,6 @@ def reedsSheppNode(currentNode, goalNode, map):
             cost = reedsSheppCost(currentNode, path)
             return Node(goalNode.gridIndex ,traj, None, None, cost, index(currentNode))
     return None
-
-def isValid(traj, gridIndex, map):
-    # Check if Node is out of map bounds
-    if gridIndex[0]<=map.mapMinX or gridIndex[0]>=map.mapMaxX or \
-       gridIndex[1]<=map.mapMinY or gridIndex[1]>=map.mapMaxY:
-        return False
-
-    # Check if Node is colliding with an obstacle
-    if collision(traj, map):
-        return False
-    return True
-
-def collision(traj, map):
-    carRadius = (Car.axleToFront + Car.axleToBack)/2 + 1
-    dl = (Car.axleToFront - Car.axleToBack)/2
-    for i in traj:
-        cx = i[0] + dl * math.cos(i[2])
-        cy = i[1] + dl * math.sin(i[2])
-        pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], carRadius)
-        if not pointsInObstacle:
-            continue
-
-        for p in pointsInObstacle:
-            xo = map.obstacleX[p] - cx
-            yo = map.obstacleY[p] - cy
-            dx = xo * math.cos(i[2]) + yo * math.sin(i[2])
-            dy = -xo * math.sin(i[2]) + yo * math.cos(i[2])
-
-            if abs(dx) < carRadius and abs(dy) < Car.width / 2 + 1:
-                return True
-
-    return False
 
 def reedsSheppCost(currentNode, path):
     # Previos Node Cost
@@ -338,226 +283,167 @@ def reedsSheppCost(currentNode, path):
 
     return cost
 
-def simulatedPathCost(currentNode, motionCommand, simulationLength):
-    # Previos Node Cost
-    cost = currentNode.cost
 
-    # Distance cost
-    if motionCommand[1] == 1:
-        cost += simulationLength 
-    else:
-        cost += simulationLength * Cost.reverse
+class HybridAStar:
+    def __init__(self, move_step=2, step=0.2):
 
-    # Direction change cost
-    if currentNode.direction != motionCommand[1]:
-        cost += Cost.directionChange
+        self.start = Node(*map.s) 
+        self.start.update_cost()
+       
+        # Error Check
+        self.end = Node(*map.g)
+        if not self.start.in_map() or not self.end.in_map():
+            raise ValueError(f"x坐标y坐标超出地图边界")
+        if self.start.is_collided():
+            raise ValueError(f"起点x坐标或y坐标在障碍物上")
+        if self.end.is_collided():
+            raise ValueError(f"终点x坐标或y坐标在障碍物上")
+       
+        self.reset(move_step)
+        
+    def reset(self, move_step):
+        """重置算法"""
+        self.__reset_flag = False
+        self.move_step = move_step
+        self.close_set = set()                    # 存储已经走过的位置及其G值 
+        self.open_queue = SetQueue()              # 存储当前位置周围可行的位置及其F值
+        self.path_list = []                       # 存储路径(CloseList里的数据无序)
 
-    # Steering Angle Cost
-    cost += motionCommand[0] * Cost.steerAngle
-
-    # Steering Angle change cost
-    cost += abs(motionCommand[0] - currentNode.steeringAngle) * Cost.steerAngleChange
-
-    return cost
-
-def eucledianCost(holonomicMotionCommand):
-    # Compute Eucledian Distance between two nodes
-    return math.hypot(holonomicMotionCommand[0], holonomicMotionCommand[1])
-
-def holonomicNodeIndex(HolonomicNode):
-    # Index is a tuple consisting grid index, used for checking if two nodes are near/same
-    return tuple([HolonomicNode.gridIndex[0], HolonomicNode.gridIndex[1]])
-
-def obstaclesMap(obstacleX, obstacleY, xyResolution):
-    # Compute Grid Index for obstacles
-    obstacleX = [round(x / xyResolution) for x in obstacleX]
-    obstacleY = [round(y / xyResolution) for y in obstacleY]
-
-    # Set all Grid locations to No Obstacle
-    obstacles =[[False for i in range(max(obstacleY))]for i in range(max(obstacleX))]
-
-    # Set Grid Locations with obstacles to True
-    for x in range(max(obstacleX)):
-        for y in range(max(obstacleY)):
-            for i, j in zip(obstacleX, obstacleY):
-                if math.hypot(i-x, j-y) <= 1/2:
-                    obstacles[i][j] = True
-                    break
-    return obstacles
-
-def holonomicNodeIsValid(neighbourNode, obstacles, map):
-    # Check if Node is out of map bounds
-    if neighbourNode.gridIndex[0]<= map.mapMinX or \
-       neighbourNode.gridIndex[0]>= map.mapMaxX or \
-       neighbourNode.gridIndex[1]<= map.mapMinY or \
-       neighbourNode.gridIndex[1]>= map.mapMaxY:
-        return False
-
-    # Check if Node on obstacle
-    if obstacles[neighbourNode.gridIndex[0]][neighbourNode.gridIndex[1]]:
-        return False
-
-    return True
-
-def holonomicCostsWithObstacles(goalNode, map):
-    gridIndex = [round(goalNode.traj[-1][0]/map.xyResolution), round(goalNode.traj[-1][1]/map.xyResolution)]
-    gNode =HolonomicNode(gridIndex, 0, tuple(gridIndex))
-
-    obstacles = obstaclesMap(map.obstacleX, map.obstacleY, map.xyResolution)
-
-    holonomicMotionCommand = holonomicMotionCommands()
-
-    openSet = {holonomicNodeIndex(gNode): gNode}
-    closedSet = {}
-
-    priorityQueue =[]
-    heapq.heappush(priorityQueue, (gNode.cost, holonomicNodeIndex(gNode)))
-
-    while True:
-        if not openSet:
-            break
-
-        _, currentNodeIndex = heapq.heappop(priorityQueue)
-        currentNode = openSet[currentNodeIndex]
-        openSet.pop(currentNodeIndex)
-        closedSet[currentNodeIndex] = currentNode
-
-        for i in range(len(holonomicMotionCommand)):
-            neighbourNode = HolonomicNode([currentNode.gridIndex[0] + holonomicMotionCommand[i][0], currentNode.gridIndex[1] + holonomicMotionCommand[i][1]],
-                                      currentNode.cost + eucledianCost(holonomicMotionCommand[i]), currentNodeIndex)
-
-            if not holonomicNodeIsValid(neighbourNode, obstacles, map):
+    def _update_open_list(self, curr: Node):
+        """open_list添加可行点"""
+        for angle, dir in Car.motion_commands:
+            # 更新节点
+            next_ = curr
+            for _ in range(self.move_step):
+                next_ = next_([angle, dir]) # x、y、yaw、G_cost、parent都更新了, F_cost未更新
+            
+            # 新位置是否在地图外边
+            if not next_.in_map():
+                continue
+            # 新位置是否碰到障碍物
+            if next_.is_collided():
+                continue
+            # 新位置是否在 CloseList 中
+            if next_ in self.close_set:
                 continue
 
-            neighbourNodeIndex = holonomicNodeIndex(neighbourNode)
+            # 更新F代价
+            H = next_.update_cost()
 
-            if neighbourNodeIndex not in closedSet:            
-                if neighbourNodeIndex in openSet:
-                    if neighbourNode.cost < openSet[neighbourNodeIndex].cost:
-                        openSet[neighbourNodeIndex].cost = neighbourNode.cost
-                        openSet[neighbourNodeIndex].parentIndex = neighbourNode.parentIndex
-                        # heapq.heappush(priorityQueue, (neighbourNode.cost, neighbourNodeIndex))
-                else:
-                    openSet[neighbourNodeIndex] = neighbourNode
-                    heapq.heappush(priorityQueue, (neighbourNode.cost, neighbourNodeIndex))
+            # open-list添加/更新结点
+            self.open_queue.put(next_)
+            
+            # 当剩余距离小时, 走慢一点
+            if H < 20:
+                self.move_step = 1
+                
+            
+    def __call__(self):
+        """A*路径搜索"""
+        assert not self.__reset_flag, "call之前需要reset"
+        print("搜索中\n")
 
-    holonomicCost = [[np.inf for i in range(max(map.obstacleY))]for i in range(max(map.obstacleX))]
+        # 初始化 OpenList
+        self.open_queue.put(self.start)
 
-    for nodes in closedSet.values():
-        holonomicCost[nodes.gridIndex[0]][nodes.gridIndex[1]]=nodes.cost
+        # 正向搜索节点
+        tic()
+        while not self.open_queue.empty():
+            # 弹出 OpenList 代价 F 最小的点
+            curr: Node = self.open_queue.get()
+            # 更新 OpenList
+            self._update_open_list(curr)
+            # 更新 CloseList
+            self.close_set.add(curr)
+            # 结束迭代
+            if curr.is_end():
+                break
+        print("路径搜索完成\n")
+        toc()
 
-    return holonomicCost
+        # 节点组合成路径
+        while curr.parent is not None:
+            self.path_list.append(curr)
+            curr = curr.parent
+        self.path_list.reverse()
+            
+        # 需要重置
+        self.__reset_flag = True
 
+        return self.path_list
 
+#_______________________________________________________________________________________________________________________________________________________
+# def run(s, g, map, plt):
 
-def backtrack(startNode, goalNode, closedSet):
+#     # Add start node to open Set
+#     openSet = {index(startNode):startNode}
+#     closedSet = {}
 
-    # Goal Node data
-    startNodeIndex= index(startNode)
-    currentNodeIndex = goalNode.parentIndex
-    currentNode = closedSet[currentNodeIndex]
-    x=[]
-    y=[]
-    yaw=[]
+#     # Create a priority queue for acquiring nodes based on their cost's
+#     costQueue = heapdict()
 
-    # Iterate till we reach start node from goal node
-    while currentNodeIndex != startNodeIndex:
-        a, b, c = zip(*currentNode.traj)
-        x += a[::-1] 
-        y += b[::-1] 
-        yaw += c[::-1]
-        currentNodeIndex = currentNode.parentIndex
-        currentNode = closedSet[currentNodeIndex]
-    return x[::-1], y[::-1], yaw[::-1]
+#     # Add start mode into priority queue
+#     costQueue[index(startNode)] = max(startNode.cost , Cost.hybridCost * holonomicHeuristics[startNode.gridIndex[0]][startNode.gridIndex[1]])
+#     counter = 0
 
-def run(s, g, map, plt):
-    # Compute Grid Index for start and Goal node
-    sGridIndex = [round(s[0] / map.xyResolution), \
-                  round(s[1] / map.xyResolution), \
-                  round(s[2]/map.yawResolution)]
-    gGridIndex = [round(g[0] / map.xyResolution), \
-                  round(g[1] / map.xyResolution), \
-                  round(g[2]/map.yawResolution)]
+#     # Run loop while path is found or open set is empty
+#     while True:
+#         counter +=1
+#         # Check if openSet is empty, if empty no solution available
+#         if not openSet:
+#             return None
 
-    # Generate all Possible motion commands to car
-    motionCommand = motionCommands()
+#         # Get first node in the priority queue
+#         currentNodeIndex = costQueue.popitem()[0]
+#         currentNode = openSet[currentNodeIndex]
 
-    # Create start and end Node
-    startNode = Node(sGridIndex, [s], 0, 1, 0 , tuple(sGridIndex))
-    goalNode = Node(gGridIndex, [g], 0, 1, 0, tuple(gGridIndex))
+#         # Revove currentNode from openSet and add it to closedSet
+#         openSet.pop(currentNodeIndex)
+#         closedSet[currentNodeIndex] = currentNode
 
-    # Find Holonomic Heuristric
-    holonomicHeuristics = holonomicCostsWithObstacles(goalNode, map)
+#         # Get Reed-Shepp Node if available
+#         rSNode = reedsSheppNode(currentNode, goalNode, map)
 
-    # Add start node to open Set
-    openSet = {index(startNode):startNode}
-    closedSet = {}
+#         # Id Reeds-Shepp Path is found exit
+#         if rSNode:
+#             closedSet[index(rSNode)] = rSNode
+#             break
 
-    # Create a priority queue for acquiring nodes based on their cost's
-    costQueue = heapdict()
+#         # USED ONLY WHEN WE DONT USE REEDS-SHEPP EXPANSION OR WHEN START = GOAL
+#         if currentNodeIndex == index(goalNode):
+#             print("Path Found")
+#             print(currentNode.traj[-1])
+#             break
 
-    # Add start mode into priority queue
-    costQueue[index(startNode)] = max(startNode.cost , Cost.hybridCost * holonomicHeuristics[startNode.gridIndex[0]][startNode.gridIndex[1]])
-    counter = 0
+#         # Get all simulated Nodes from current node
+#         for i in range(len(motionCommand)):
+#             simulatedNode = kinematicSimulationNode(currentNode, motionCommand[i], map)
 
-    # Run loop while path is found or open set is empty
-    while True:
-        counter +=1
-        # Check if openSet is empty, if empty no solution available
-        if not openSet:
-            return None
+#             # Check if path is within map bounds and is collision free
+#             if not simulatedNode:
+#                 continue
 
-        # Get first node in the priority queue
-        currentNodeIndex = costQueue.popitem()[0]
-        currentNode = openSet[currentNodeIndex]
+#             # Draw Simulated Node
+#             x,y,z =zip(*simulatedNode.traj)
+#             plt.plot(x, y, linewidth=0.3, color='g')
 
-        # Revove currentNode from openSet and add it to closedSet
-        openSet.pop(currentNodeIndex)
-        closedSet[currentNodeIndex] = currentNode
+#             # Check if simulated node is already in closed set
+#             simulatedNodeIndex = index(simulatedNode)
+#             if simulatedNodeIndex not in closedSet: 
 
-        # Get Reed-Shepp Node if available
-        rSNode = reedsSheppNode(currentNode, goalNode, map)
-
-        # Id Reeds-Shepp Path is found exit
-        if rSNode:
-            closedSet[index(rSNode)] = rSNode
-            break
-
-        # USED ONLY WHEN WE DONT USE REEDS-SHEPP EXPANSION OR WHEN START = GOAL
-        if currentNodeIndex == index(goalNode):
-            print("Path Found")
-            print(currentNode.traj[-1])
-            break
-
-        # Get all simulated Nodes from current node
-        for i in range(len(motionCommand)):
-            simulatedNode = kinematicSimulationNode(currentNode, motionCommand[i], map)
-
-            # Check if path is within map bounds and is collision free
-            if not simulatedNode:
-                continue
-
-            # Draw Simulated Node
-            x,y,z =zip(*simulatedNode.traj)
-            plt.plot(x, y, linewidth=0.3, color='g')
-
-            # Check if simulated node is already in closed set
-            simulatedNodeIndex = index(simulatedNode)
-            if simulatedNodeIndex not in closedSet: 
-
-                # Check if simulated node is already in open set, if not add it open set as well as in priority queue
-                if simulatedNodeIndex not in openSet:
-                    openSet[simulatedNodeIndex] = simulatedNode
-                    costQueue[simulatedNodeIndex] = max(simulatedNode.cost , Cost.hybridCost * holonomicHeuristics[simulatedNode.gridIndex[0]][simulatedNode.gridIndex[1]])
-                else:
-                    if simulatedNode.cost < openSet[simulatedNodeIndex].cost:
-                        openSet[simulatedNodeIndex] = simulatedNode
-                        costQueue[simulatedNodeIndex] = max(simulatedNode.cost , Cost.hybridCost * holonomicHeuristics[simulatedNode.gridIndex[0]][simulatedNode.gridIndex[1]])
+#                 # Check if simulated node is already in open set, if not add it open set as well as in priority queue
+#                 if simulatedNodeIndex not in openSet:
+#                     openSet[simulatedNodeIndex] = simulatedNode
+#                     costQueue[simulatedNodeIndex] = max(simulatedNode.cost , Cost.hybridCost * holonomicHeuristics[simulatedNode.gridIndex[0]][simulatedNode.gridIndex[1]])
+#                 else:
+#                     if simulatedNode.cost < openSet[simulatedNodeIndex].cost:
+#                         openSet[simulatedNodeIndex] = simulatedNode
+#                         costQueue[simulatedNodeIndex] = max(simulatedNode.cost , Cost.hybridCost * holonomicHeuristics[simulatedNode.gridIndex[0]][simulatedNode.gridIndex[1]])
     
-    # Backtrack
-    x, y, yaw = backtrack(startNode, goalNode, closedSet)
+#     # Backtrack
+#     x, y, yaw = backtrack(startNode, goalNode, closedSet)
 
-    return x, y, yaw
+#     return x, y, yaw
 
 def drawCar(x, y, yaw, color='black'):
     car = np.array([[-Car.axleToBack, -Car.axleToBack, Car.axleToFront, Car.axleToFront, -Car.axleToBack],
@@ -569,9 +455,6 @@ def drawCar(x, y, yaw, color='black'):
     car += np.array([[x], [y]])
     plt.plot(car[0, :], car[1, :], color)
 
-
-
-
 def main():
     # Set Start, Goal x, y, theta
     
@@ -579,17 +462,26 @@ def main():
     # g = [22, 28, np.deg2rad(0)]
 
     # Get Obstacle Map
-    # obstacleX, obstacleY = map()
+    obstacleX = map.obstacleX
+    obstacleY = map.obstacleY
 
     # Calculate map Paramaters
     # map = calculatemap(obstacleX, obstacleY, 4, np.deg2rad(15.0))
 
     # Run Hybrid A*
-    x, y, yaw = run(s, g, map, plt)
+    x = []
+    y = []
+    yaw = []
+    path = HybridAStar()()
+    for node in path:
+        x.append(node.x)
+        y.append(node.y)
+        yaw.append(node.yaw)
+    # x, y, yaw = run(s, g, map, plt)
 
     # Draw Start, Goal Location Map and Path
-    # plt.arrow(s[0], s[1], 1*math.cos(s[2]), 1*math.sin(s[2]), width=.1)
-    # plt.arrow(g[0], g[1], 1*math.cos(g[2]), 1*math.sin(g[2]), width=.1)
+    # plt.arrow(map.s[0], map.s[1], 1*math.cos(map.s[2]), 1*math.sin(map.s[2]), width=.1)
+    # plt.arrow(map.g[0], map.g[1], 1*math.cos(map.g[2]), 1*math.sin(map.g[2]), width=.1)
     # plt.xlim(min(obstacleX), max(obstacleX)) 
     # plt.ylim(min(obstacleY), max(obstacleY))
     # plt.plot(obstacleX, obstacleY, "sk")
