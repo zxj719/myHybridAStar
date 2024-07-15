@@ -2,6 +2,7 @@ import math
 import sys
 import os
 import heapq
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from heapdict import heapdict
@@ -9,6 +10,96 @@ import scipy.spatial as kd
 import reeds_shepp as rsCurve
 from dataclasses import dataclass
 from common import SetQueue, GridMap, tic, toc, limit_angle
+
+# 地图读取
+# IMAGE_PATH = 'image1.jpg' # 原图路径
+# THRESH = 172              # 图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
+# MAP_HIGHT = 70            # 地图高度
+# MAP_WIDTH = 120           # 地图宽度
+# # 图像处理生成网格地图
+# class GridMap:
+#     """从图片中提取栅格地图"""
+
+#     def __init__(
+#         self, 
+#         img_path: str,
+#         thresh: int,
+#         high: int,
+#         width: int,
+#     ):
+#         """提取栅格地图
+
+#         Parameters
+#         ----------
+#         img_path : str
+#             原图片路径
+#         thresh : int
+#             图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
+#         high : int
+#             栅格地图高度
+#         width : int
+#             栅格地图宽度
+#         """
+#         # 存储路径
+#         self.__map_path = 'map.png' # 栅格地图路径
+#         self.__path_path = 'path.png' # 路径规划结果路径
+
+#         # 图像处理 #  NOTE cv2 按 HWC 存储图片
+#         image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)                     # 读取原图 H,W,C
+#         thresh, map_img = cv2.threshold(image, thresh, 255, cv2.THRESH_BINARY) # 地图二值化
+#         map_img = cv2.resize(map_img, (width, high))                           # 设置地图尺寸
+#         cv2.imwrite(self.__map_path, map_img)                                  # 存储二值地图
+
+#         # 栅格地图属性
+#         self.map_array = np.array(map_img)
+#         """ndarray地图, H*W, 0代表障碍物"""
+#         self.high = high
+#         """ndarray地图高度"""
+#         self.width = width
+#         """ndarray地图宽度"""
+
+#     def show_path(self, x, y, yaw, *, save = False):
+#         """路径规划结果绘制
+
+#         Parameters
+#         ----------
+#         path_list : list[Node]
+#             路径节点组成的列表, 要求Node有x,y属性
+#         save : bool, optional
+#             是否保存结果图片
+#         """
+       
+#         fig, ax = plt.subplots()
+#         map_ = cv2.imread(self.__map_path)
+#         map_ = cv2.resize(map_, (self.width, self.high)) 
+#         #img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # R G B
+#         #img = img[:, :, ::-1] # R G B
+#         map_ = map_[::-1] # 画出来的鸡哥是反的, 需要转过来
+#         ax.imshow(map_, extent=[0, self.width, 0, self.high]) # extent[x_min, x_max, y_min, y_max]
+#         # ax.plot(x, y, c = 'r', label='path', linewidth=2)
+#         ax.scatter(x[0], y[0], c='c', marker='o', label='start', s=40, linewidth=2)
+#         ax.scatter(x[-1], y[-1], c='c', marker='x', label='end', s=40, linewidth=2)
+#         for k in np.arange(0, len(x), 2):
+#             drawCar(x[k], y[k], yaw[k])
+#             plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
+#             plt.title("Hybrid A*")
+#         ax.invert_yaxis() # 反转y轴
+#         ax.legend().set_draggable(True)
+#         plt.show()
+#         if save:
+#             plt.savefig(self.__path_path)
+
+        # plt.plot(x, y, linewidth=1.5, color='r', zorder=0)
+        # plt.plot(map.obstacleX, map.obstacleY, "sk")
+        # for k in np.arange(0, len(x), 2):
+        #     plt.xlim(min(map.obstacleX), max(map.obstacleX)) 
+        #     plt.ylim(min(map.obstacleY), max(map.obstacleY))
+        #     drawCar(x[k], y[k], yaw[k])
+        #     plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
+        #     plt.title("Hybrid A*")
+        
+
+MAP = GridMap(IMAGE_PATH, THRESH, MAP_HIGHT, MAP_WIDTH) # 栅格地图对象
 
 class Car:
     maxSteerAngle = 0.6
@@ -44,51 +135,11 @@ class Map:
     xyResolution: int = 1     # grid block length
     yawResolution: float = np.deg2rad(15.0)  # grid block possible yaws
     s = [10, 10, np.deg2rad(90)]
-    g = [25, 10, np.deg2rad(-90)]
-
-    def __init__(self) -> None:
-        # Build Map
+    g = [25, 10, np.deg2rad(90)]
+    
+    def __init__(self):
         self.obstacleX, self.obstacleY = [], []
-        
-        for i in range(51):
-            self.obstacleX.append(i)
-            self.obstacleY.append(0)
-
-        for i in range(51):
-            self.obstacleX.append(0)
-            self.obstacleY.append(i)
-
-        for i in range(51):
-            self.obstacleX.append(i)
-            self.obstacleY.append(50)
-
-        for i in range(51):
-            self.obstacleX.append(50)
-            self.obstacleY.append(i)
-        
-        for i in range(6,20):
-            self.obstacleX.append(i)
-            self.obstacleY.append(30)
-
-        for i in range(30,51):
-            self.obstacleX.append(i)
-            self.obstacleY.append(30) 
-
-        for i in range(0,31):
-            self.obstacleX.append(20)
-            self.obstacleY.append(i) 
-
-        for i in range(0,31):
-            self.obstacleX.append(30)
-            self.obstacleY.append(i) 
-
-        for i in range(40,50):
-            self.obstacleX.append(15)
-            self.obstacleY.append(i)
-
-        for i in range(25,40):
-            self.obstacleX.append(i)
-            self.obstacleY.append(35)
+        self.generate_obstacles()
 
         # calculate min max map grid index based on obstacles in map
         self.mapMinX, self.mapMinY = self.grid_idx(min(self.obstacleX), min(self.obstacleY))
@@ -96,6 +147,31 @@ class Map:
 
         # create a KDTree to represent obstacles
         self.ObstacleKDTree = kd.KDTree([[x, y] for x, y in zip(self.obstacleX, self.obstacleY)])
+
+    def generate_obstacles(self):
+        # Create boundary obstacles
+        self.create_line(0, 0, 50, 0)   # Bottom boundary
+        self.create_line(0, 0, 0, 50)   # Left boundary
+        self.create_line(0, 50, 50, 50) # Top boundary
+        self.create_line(50, 0, 50, 50) # Right boundary
+        
+        # Create internal obstacles
+        self.create_line(6, 30, 19, 30)   # Horizontal line segment
+        self.create_line(30, 30, 50, 30)  # Horizontal line segment
+        self.create_line(20, 0, 20, 30)   # Vertical line segment
+        self.create_line(30, 0, 30, 30)   # Vertical line segment
+        self.create_line(15, 40, 15, 49)  # Vertical line segment
+        self.create_line(25, 35, 39, 35)  # Horizontal line segment
+
+    def create_line(self, x1, y1, x2, y2):
+        if x1 == x2:  # Vertical line
+            for y in range(min(y1, y2), max(y1, y2) + 1):
+                self.obstacleX.append(x1)
+                self.obstacleY.append(y)
+        elif y1 == y2:  # Horizontal line
+            for x in range(min(x1, x2), max(x1, x2) + 1):
+                self.obstacleX.append(x)
+                self.obstacleY.append(y1)
 
     @staticmethod
     def grid_idx(*pos):
@@ -126,9 +202,9 @@ class Node:
         if self.cost is None:
             self.cost = self.heuristic([self.x, self.y], map.g)
     
-    def __call__(self, command):
+    def __call__(self, command, step):
         # Iterate next node
-        x, y, yaw = self.kinematic_simulate(command)
+        x, y, yaw = self.kinematic_simulate(command, step)
         angle, dir = command
         G = self.G + self.heuristic([self.x, self.y], [x, y]) + self.simulatedPathCost(command)
         return Node(x, y, yaw, parent=self, dir=dir, angle=angle, G=G)
@@ -161,12 +237,10 @@ class Node:
         if self.cost - self.G < err:
             return True
         return False
-    
-    def in_map(self):
-        """是否在地图中"""
-        return (0 <= self.x < max(map.obstacleX)) and (0 <= self.y < max(map.obstacleY))
 
     def is_collided(self):
+        if not ((0 <= self.x < max(map.obstacleX)) and (0 <= self.y < max(map.obstacleY))):
+            return True
         cos_ = math.cos(self.yaw)
         sin_ = math.sin(self.yaw)
         car_len = (Car.axleToFront + Car.axleToBack)/2 + 1
@@ -216,12 +290,31 @@ class Node:
         cost += abs(motionCommand[0] - self.angle) * Cost.steerAngleChange
         return cost
 
+def collision(traj):
+    carRadius = (Car.axleToFront + Car.axleToBack)/2 + 1
+    dl = (Car.axleToFront - Car.axleToBack)/2
+    for i in traj:
+        cx = i[0] + dl * math.cos(i[2])
+        cy = i[1] + dl * math.sin(i[2])
+        pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], carRadius)
+        if not pointsInObstacle:
+            continue
 
+        for p in pointsInObstacle:
+            xo = map.obstacleX[p] - cx
+            yo = map.obstacleY[p] - cy
+            dx = xo * math.cos(i[2]) + yo * math.sin(i[2])
+            dy = -xo * math.sin(i[2]) + yo * math.cos(i[2])
 
-def reedsSheppNode(currentNode, goalNode, map):
+            if abs(dx) < carRadius and abs(dy) < Car.width / 2 + 1:
+                return True
+
+    return False
+
+def reedsSheppNode(currentNode, goalNode):
     # Get x, y, yaw of currentNode and goalNode
-    startX, startY, startYaw = currentNode.traj[-1][0], currentNode.traj[-1][1], currentNode.traj[-1][2]
-    goalX, goalY, goalYaw = goalNode.traj[-1][0], goalNode.traj[-1][1], goalNode.traj[-1][2]
+    startX, startY, startYaw = currentNode.x, currentNode.y, currentNode.yaw
+    goalX, goalY, goalYaw = goalNode.x, goalNode.y, goalNode.yaw
 
     # Instantaneous Radius of Curvature
     radius = math.tan(Car.maxSteerAngle)/Car.wheelBase
@@ -242,34 +335,36 @@ def reedsSheppNode(currentNode, goalNode, map):
     while len(costQueue)!=0:
         path = costQueue.popitem()[0]
         traj=[]
-        traj = [[path.x[k],path.y[k],path.yaw[k]] for k in range(len(path.x))]
-        if not collision(traj, map):
-            cost = reedsSheppCost(currentNode, path)
-            return Node(goalNode.gridIndex ,traj, None, None, cost, index(currentNode))
+        node_list = []
+        parent = currentNode
+        for k in range(len(path.x)):
+            traj.append([path.x[k],path.y[k],path.yaw[k]])
+            curr = Node(path.x[k],path.y[k],path.yaw[k], parent)
+            node_list.append(curr)
+            parent = curr
+        if not collision(traj):
+            node_list.append(Node(goalNode.x, goalNode.y, goalNode.yaw, parent))
+            return node_list
     return None
 
 def reedsSheppCost(currentNode, path):
     # Previos Node Cost
-    cost = currentNode.cost
-
+    cost = currentNode.G
     # Distance cost
     for i in path.lengths:
         if i >= 0:
             cost += 1
         else:
             cost += abs(i) * Cost.reverse
-
     # Direction change cost
     for i in range(len(path.lengths)-1):
         if path.lengths[i] * path.lengths[i+1] < 0:
             cost += Cost.directionChange
-
     # Steering Angle Cost
     for i in path.ctypes:
         # Check types which are not straight line
         if i!="S":
             cost += Car.maxSteerAngle * Cost.steerAngle
-
     # Steering Angle change cost
     turnAngle=[0.0 for _ in range(len(path.ctypes))]
     for i in range(len(path.ctypes)):
@@ -277,37 +372,35 @@ def reedsSheppCost(currentNode, path):
             turnAngle[i] = - Car.maxSteerAngle
         if path.ctypes[i] == "WB":
             turnAngle[i] = Car.maxSteerAngle
-
     for i in range(len(path.lengths)-1):
         cost += abs(turnAngle[i+1] - turnAngle[i]) * Cost.steerAngleChange
-
     return cost
 
 
 class HybridAStar:
-    def __init__(self, move_step=2, step=0.2):
+    def __init__(self, move_step=4, step=0.8):
 
         self.start = Node(*map.s) 
         self.start.update_cost()
-       
+        
         # Error Check
         self.end = Node(*map.g)
-        if not self.start.in_map() or not self.end.in_map():
-            raise ValueError(f"x坐标y坐标超出地图边界")
         if self.start.is_collided():
             raise ValueError(f"起点x坐标或y坐标在障碍物上")
         if self.end.is_collided():
             raise ValueError(f"终点x坐标或y坐标在障碍物上")
        
-        self.reset(move_step)
+        self.reset(move_step, step)
         
-    def reset(self, move_step):
+    def reset(self, move_step, step):
         """重置算法"""
+        self.step = step
         self.__reset_flag = False
         self.move_step = move_step
         self.close_set = set()                    # 存储已经走过的位置及其G值 
         self.open_queue = SetQueue()              # 存储当前位置周围可行的位置及其F值
         self.path_list = []                       # 存储路径(CloseList里的数据无序)
+        self.rSNode = None
 
     def _update_open_list(self, curr: Node):
         """open_list添加可行点"""
@@ -315,42 +408,39 @@ class HybridAStar:
             # 更新节点
             next_ = curr
             for _ in range(self.move_step):
-                next_ = next_([angle, dir]) # x、y、yaw、G_cost、parent都更新了, F_cost未更新
-            
-            # 新位置是否在地图外边
-            if not next_.in_map():
-                continue
+                next_ = next_([angle, dir], self.step) # x、y、yaw、G_cost、parent都更新了, F_cost未更新
             # 新位置是否碰到障碍物
             if next_.is_collided():
                 continue
             # 新位置是否在 CloseList 中
             if next_ in self.close_set:
                 continue
-
             # 更新F代价
             H = next_.update_cost()
-
             # open-list添加/更新结点
             self.open_queue.put(next_)
-            
-            # 当剩余距离小时, 走慢一点
-            if H < 20:
-                self.move_step = 1
                 
             
     def __call__(self):
         """A*路径搜索"""
         assert not self.__reset_flag, "call之前需要reset"
         print("搜索中\n")
-
         # 初始化 OpenList
         self.open_queue.put(self.start)
-
         # 正向搜索节点
         tic()
         while not self.open_queue.empty():
             # 弹出 OpenList 代价 F 最小的点
             curr: Node = self.open_queue.get()
+            # Get Reed-Shepp Node if available
+            rSNode = reedsSheppNode(curr, self.end)
+            # Id Reeds-Shepp Path is found exit
+            if rSNode:
+                self.close_set = set()
+                for i in range(len(rSNode)):
+                    self.close_set.add(rSNode[i])
+                curr = rSNode[-1]
+                break
             # 更新 OpenList
             self._update_open_list(curr)
             # 更新 CloseList
@@ -372,79 +462,6 @@ class HybridAStar:
 
         return self.path_list
 
-#_______________________________________________________________________________________________________________________________________________________
-# def run(s, g, map, plt):
-
-#     # Add start node to open Set
-#     openSet = {index(startNode):startNode}
-#     closedSet = {}
-
-#     # Create a priority queue for acquiring nodes based on their cost's
-#     costQueue = heapdict()
-
-#     # Add start mode into priority queue
-#     costQueue[index(startNode)] = max(startNode.cost , Cost.hybridCost * holonomicHeuristics[startNode.gridIndex[0]][startNode.gridIndex[1]])
-#     counter = 0
-
-#     # Run loop while path is found or open set is empty
-#     while True:
-#         counter +=1
-#         # Check if openSet is empty, if empty no solution available
-#         if not openSet:
-#             return None
-
-#         # Get first node in the priority queue
-#         currentNodeIndex = costQueue.popitem()[0]
-#         currentNode = openSet[currentNodeIndex]
-
-#         # Revove currentNode from openSet and add it to closedSet
-#         openSet.pop(currentNodeIndex)
-#         closedSet[currentNodeIndex] = currentNode
-
-#         # Get Reed-Shepp Node if available
-#         rSNode = reedsSheppNode(currentNode, goalNode, map)
-
-#         # Id Reeds-Shepp Path is found exit
-#         if rSNode:
-#             closedSet[index(rSNode)] = rSNode
-#             break
-
-#         # USED ONLY WHEN WE DONT USE REEDS-SHEPP EXPANSION OR WHEN START = GOAL
-#         if currentNodeIndex == index(goalNode):
-#             print("Path Found")
-#             print(currentNode.traj[-1])
-#             break
-
-#         # Get all simulated Nodes from current node
-#         for i in range(len(motionCommand)):
-#             simulatedNode = kinematicSimulationNode(currentNode, motionCommand[i], map)
-
-#             # Check if path is within map bounds and is collision free
-#             if not simulatedNode:
-#                 continue
-
-#             # Draw Simulated Node
-#             x,y,z =zip(*simulatedNode.traj)
-#             plt.plot(x, y, linewidth=0.3, color='g')
-
-#             # Check if simulated node is already in closed set
-#             simulatedNodeIndex = index(simulatedNode)
-#             if simulatedNodeIndex not in closedSet: 
-
-#                 # Check if simulated node is already in open set, if not add it open set as well as in priority queue
-#                 if simulatedNodeIndex not in openSet:
-#                     openSet[simulatedNodeIndex] = simulatedNode
-#                     costQueue[simulatedNodeIndex] = max(simulatedNode.cost , Cost.hybridCost * holonomicHeuristics[simulatedNode.gridIndex[0]][simulatedNode.gridIndex[1]])
-#                 else:
-#                     if simulatedNode.cost < openSet[simulatedNodeIndex].cost:
-#                         openSet[simulatedNodeIndex] = simulatedNode
-#                         costQueue[simulatedNodeIndex] = max(simulatedNode.cost , Cost.hybridCost * holonomicHeuristics[simulatedNode.gridIndex[0]][simulatedNode.gridIndex[1]])
-    
-#     # Backtrack
-#     x, y, yaw = backtrack(startNode, goalNode, closedSet)
-
-#     return x, y, yaw
-
 def drawCar(x, y, yaw, color='black'):
     car = np.array([[-Car.axleToBack, -Car.axleToBack, Car.axleToFront, Car.axleToFront, -Car.axleToBack],
                     [Car.width / 2, -Car.width / 2, -Car.width / 2, Car.width / 2, Car.width / 2]])
@@ -456,17 +473,6 @@ def drawCar(x, y, yaw, color='black'):
     plt.plot(car[0, :], car[1, :], color)
 
 def main():
-    # Set Start, Goal x, y, theta
-    
-    # s = [10, 35, np.deg2rad(0)]
-    # g = [22, 28, np.deg2rad(0)]
-
-    # Get Obstacle Map
-    obstacleX = map.obstacleX
-    obstacleY = map.obstacleY
-
-    # Calculate map Paramaters
-    # map = calculatemap(obstacleX, obstacleY, 4, np.deg2rad(15.0))
 
     # Run Hybrid A*
     x = []
@@ -482,29 +488,33 @@ def main():
     # Draw Start, Goal Location Map and Path
     # plt.arrow(map.s[0], map.s[1], 1*math.cos(map.s[2]), 1*math.sin(map.s[2]), width=.1)
     # plt.arrow(map.g[0], map.g[1], 1*math.cos(map.g[2]), 1*math.sin(map.g[2]), width=.1)
-    # plt.xlim(min(obstacleX), max(obstacleX)) 
-    # plt.ylim(min(obstacleY), max(obstacleY))
-    # plt.plot(obstacleX, obstacleY, "sk")
+    # plt.xlim(min(map.obstacleX), max(map.obstacleX)) 
+    # plt.ylim(min(map.obstacleY), max(map.obstacleY))
+    # plt.plot(map.obstacleX, map.obstacleY, "sk")
     # plt.plot(x, y, linewidth=2, color='r', zorder=0)
     # plt.title("Hybrid A*")
 
 
     # Draw Path, Map and Car Footprint
     plt.plot(x, y, linewidth=1.5, color='r', zorder=0)
-    plt.plot(obstacleX, obstacleY, "sk")
+    plt.plot(map.obstacleX, map.obstacleY, "sk")
     for k in np.arange(0, len(x), 2):
-        plt.xlim(min(obstacleX), max(obstacleX)) 
-        plt.ylim(min(obstacleY), max(obstacleY))
+        plt.xlim(min(map.obstacleX), max(map.obstacleX)) 
+        plt.ylim(min(map.obstacleY), max(map.obstacleY))
         drawCar(x[k], y[k], yaw[k])
         plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
         plt.title("Hybrid A*")
 
+
+    # MAP.show_path(x,y,yaw)
+
+
     # Draw Animated Car
     # for k in range(len(x)):
     #     plt.cla()
-    #     plt.xlim(min(obstacleX), max(obstacleX)) 
-    #     plt.ylim(min(obstacleY), max(obstacleY))
-    #     plt.plot(obstacleX, obstacleY, "sk")
+    #     plt.xlim(min(map.obstacleX), max(map.obstacleX)) 
+    #     plt.ylim(min(map.obstacleY), max(map.obstacleY))
+    #     plt.plot(map.obstacleX, map.obstacleY, "sk")
     #     plt.plot(x, y, linewidth=1.5, color='r', zorder=0)
     #     drawCar(x[k], y[k], yaw[k])
     #     plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
