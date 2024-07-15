@@ -12,94 +12,10 @@ from dataclasses import dataclass
 from common import SetQueue, GridMap, tic, toc, limit_angle
 
 # 地图读取
-# IMAGE_PATH = 'image1.jpg' # 原图路径
-# THRESH = 172              # 图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
-# MAP_HIGHT = 70            # 地图高度
-# MAP_WIDTH = 120           # 地图宽度
-# # 图像处理生成网格地图
-# class GridMap:
-#     """从图片中提取栅格地图"""
-
-#     def __init__(
-#         self, 
-#         img_path: str,
-#         thresh: int,
-#         high: int,
-#         width: int,
-#     ):
-#         """提取栅格地图
-
-#         Parameters
-#         ----------
-#         img_path : str
-#             原图片路径
-#         thresh : int
-#             图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
-#         high : int
-#             栅格地图高度
-#         width : int
-#             栅格地图宽度
-#         """
-#         # 存储路径
-#         self.__map_path = 'map.png' # 栅格地图路径
-#         self.__path_path = 'path.png' # 路径规划结果路径
-
-#         # 图像处理 #  NOTE cv2 按 HWC 存储图片
-#         image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)                     # 读取原图 H,W,C
-#         thresh, map_img = cv2.threshold(image, thresh, 255, cv2.THRESH_BINARY) # 地图二值化
-#         map_img = cv2.resize(map_img, (width, high))                           # 设置地图尺寸
-#         cv2.imwrite(self.__map_path, map_img)                                  # 存储二值地图
-
-#         # 栅格地图属性
-#         self.map_array = np.array(map_img)
-#         """ndarray地图, H*W, 0代表障碍物"""
-#         self.high = high
-#         """ndarray地图高度"""
-#         self.width = width
-#         """ndarray地图宽度"""
-
-#     def show_path(self, x, y, yaw, *, save = False):
-#         """路径规划结果绘制
-
-#         Parameters
-#         ----------
-#         path_list : list[Node]
-#             路径节点组成的列表, 要求Node有x,y属性
-#         save : bool, optional
-#             是否保存结果图片
-#         """
-       
-#         fig, ax = plt.subplots()
-#         map_ = cv2.imread(self.__map_path)
-#         map_ = cv2.resize(map_, (self.width, self.high)) 
-#         #img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # R G B
-#         #img = img[:, :, ::-1] # R G B
-#         map_ = map_[::-1] # 画出来的鸡哥是反的, 需要转过来
-#         ax.imshow(map_, extent=[0, self.width, 0, self.high]) # extent[x_min, x_max, y_min, y_max]
-#         # ax.plot(x, y, c = 'r', label='path', linewidth=2)
-#         ax.scatter(x[0], y[0], c='c', marker='o', label='start', s=40, linewidth=2)
-#         ax.scatter(x[-1], y[-1], c='c', marker='x', label='end', s=40, linewidth=2)
-#         for k in np.arange(0, len(x), 2):
-#             drawCar(x[k], y[k], yaw[k])
-#             plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
-#             plt.title("Hybrid A*")
-#         ax.invert_yaxis() # 反转y轴
-#         ax.legend().set_draggable(True)
-#         plt.show()
-#         if save:
-#             plt.savefig(self.__path_path)
-
-        # plt.plot(x, y, linewidth=1.5, color='r', zorder=0)
-        # plt.plot(map.obstacleX, map.obstacleY, "sk")
-        # for k in np.arange(0, len(x), 2):
-        #     plt.xlim(min(map.obstacleX), max(map.obstacleX)) 
-        #     plt.ylim(min(map.obstacleY), max(map.obstacleY))
-        #     drawCar(x[k], y[k], yaw[k])
-        #     plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
-        #     plt.title("Hybrid A*")
-        
-
-MAP = GridMap(IMAGE_PATH, THRESH, MAP_HIGHT, MAP_WIDTH) # 栅格地图对象
+IMAGE_PATH = 'image1.jpg' # 原图路径
+THRESH = 172              # 图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
+MAP_HIGHT = 120            # 地图高度
+MAP_WIDTH = 120           # 地图宽度
 
 class Car:
     maxSteerAngle = 0.6
@@ -107,7 +23,7 @@ class Car:
     wheelBase = 3.5
     axleToFront = 4.5
     axleToBack = 1
-    width = 3
+    width = 2
     motion_commands = None
 
     @classmethod
@@ -131,47 +47,62 @@ class Cost:
     hybridCost = 50
 
 class Map:
-
     xyResolution: int = 1     # grid block length
     yawResolution: float = np.deg2rad(15.0)  # grid block possible yaws
-    s = [10, 10, np.deg2rad(90)]
-    g = [25, 10, np.deg2rad(90)]
-    
-    def __init__(self):
-        self.obstacleX, self.obstacleY = [], []
-        self.generate_obstacles()
+    # s = [10, 10, np.deg2rad(90)]
+    # g = [25, 10, np.deg2rad(90)]
+    s = [5.0, 35.0, -math.pi/6] # 起点 (x, y, yaw), y轴向下为正, yaw顺时针为正
+    g = [60.0, 80.0, math.pi/2] 
 
-        # calculate min max map grid index based on obstacles in map
-        self.mapMinX, self.mapMinY = self.grid_idx(min(self.obstacleX), min(self.obstacleY))
-        self.mapMaxX, self.mapMaxY = self.grid_idx(max(self.obstacleX), max(self.obstacleY))
+    
+    def __init__(self,
+        img_path: str,
+        thresh: int,
+        high: int,
+        width: int):        
+        """提取栅格地图
+        Parameters
+        ----------
+        img_path : str
+            原图片路径
+        thresh : int
+            图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
+        high : int
+            栅格地图高度
+        width : int
+            栅格地图宽度
+        """
+        # 存储路径
+        self.__map_path = 'map.png' # 栅格地图路径
+        self.__path_path = 'path.png' # 路径规划结果路径
+
+        # 图像处理 #  NOTE cv2 按 HWC 存储图片
+        image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)                     # 读取原图 H,W,C
+        thresh, map_img = cv2.threshold(image, thresh, 255, cv2.THRESH_BINARY) # 地图二值化
+        map_img = cv2.resize(map_img, (width, high))                           # 设置地图尺寸
+        cv2.imwrite(self.__map_path, map_img)                                  # 存储二值地图
+
+        # 栅格地图属性
+        self.map_array = np.array(map_img)
+        """ndarray地图, H*W, 0代表障碍物"""
+        self.high = high
+        """ndarray地图高度"""
+        self.width = width
+        """ndarray地图宽度"""
+
+        self.obstacleX, self.obstacleY = [], []
+        
+        self.generate_obstacles()
 
         # create a KDTree to represent obstacles
         self.ObstacleKDTree = kd.KDTree([[x, y] for x, y in zip(self.obstacleX, self.obstacleY)])
 
     def generate_obstacles(self):
-        # Create boundary obstacles
-        self.create_line(0, 0, 50, 0)   # Bottom boundary
-        self.create_line(0, 0, 0, 50)   # Left boundary
-        self.create_line(0, 50, 50, 50) # Top boundary
-        self.create_line(50, 0, 50, 50) # Right boundary
-        
-        # Create internal obstacles
-        self.create_line(6, 30, 19, 30)   # Horizontal line segment
-        self.create_line(30, 30, 50, 30)  # Horizontal line segment
-        self.create_line(20, 0, 20, 30)   # Vertical line segment
-        self.create_line(30, 0, 30, 30)   # Vertical line segment
-        self.create_line(15, 40, 15, 49)  # Vertical line segment
-        self.create_line(25, 35, 39, 35)  # Horizontal line segment
-
-    def create_line(self, x1, y1, x2, y2):
-        if x1 == x2:  # Vertical line
-            for y in range(min(y1, y2), max(y1, y2) + 1):
-                self.obstacleX.append(x1)
-                self.obstacleY.append(y)
-        elif y1 == y2:  # Horizontal line
-            for x in range(min(x1, x2), max(x1, x2) + 1):
-                self.obstacleX.append(x)
-                self.obstacleY.append(y1)
+        for i in range(self.width):
+            for j in range(self.high):
+                if self.map_array[j][i] == 0:
+                    self.obstacleX.append(i)
+                    self.obstacleY.append(j)
 
     @staticmethod
     def grid_idx(*pos):
@@ -183,7 +114,7 @@ class Map:
         """Index configuration (x, y, yaw) as map grid node"""
         return (round(args[0] / Map.xyResolution), round(args[1] / Map.xyResolution), round(args[2] / Map.yawResolution))
 
-map = Map()
+map = Map(IMAGE_PATH, THRESH, MAP_HIGHT, MAP_WIDTH)
 
 @dataclass(eq=False)
 class Node:
@@ -239,7 +170,7 @@ class Node:
         return False
 
     def is_collided(self):
-        if not ((0 <= self.x < max(map.obstacleX)) and (0 <= self.y < max(map.obstacleY))):
+        if 0 > self.x or self.x >= map.width or 0 > self.y or self.y >= map.high:
             return True
         cos_ = math.cos(self.yaw)
         sin_ = math.sin(self.yaw)
@@ -296,6 +227,8 @@ def collision(traj):
     for i in traj:
         cx = i[0] + dl * math.cos(i[2])
         cy = i[1] + dl * math.sin(i[2])
+        if cx < carRadius or cy < carRadius or cx > map.width-carRadius or cy > map.high-carRadius:
+            return True
         pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], carRadius)
         if not pointsInObstacle:
             continue
@@ -319,7 +252,7 @@ def reedsSheppNode(currentNode, goalNode):
     # Instantaneous Radius of Curvature
     radius = math.tan(Car.maxSteerAngle)/Car.wheelBase
 
-    #  Find all possible reeds-shepp paths between current and goal node
+    # Find all possible reeds-shepp paths between current and goal node
     reedsSheppPaths = rsCurve.calc_all_paths(startX, startY, startYaw, goalX, goalY, goalYaw, radius, 1)
 
     # Check if reedsSheppPaths is empty
@@ -378,7 +311,7 @@ def reedsSheppCost(currentNode, path):
 
 
 class HybridAStar:
-    def __init__(self, move_step=4, step=0.8):
+    def __init__(self, move_step=4, step=1):
 
         self.start = Node(*map.s) 
         self.start.update_cost()
@@ -499,8 +432,8 @@ def main():
     plt.plot(x, y, linewidth=1.5, color='r', zorder=0)
     plt.plot(map.obstacleX, map.obstacleY, "sk")
     for k in np.arange(0, len(x), 2):
-        plt.xlim(min(map.obstacleX), max(map.obstacleX)) 
-        plt.ylim(min(map.obstacleY), max(map.obstacleY))
+        plt.xlim(0, map.width) 
+        plt.ylim(0, map.high)
         drawCar(x[k], y[k], yaw[k])
         plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
         plt.title("Hybrid A*")
