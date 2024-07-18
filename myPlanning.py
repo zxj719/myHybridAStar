@@ -1,462 +1,372 @@
 import math
-import sys
-import os
-import heapq
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from heapdict import heapdict
 import scipy.spatial as kd
 import reeds_shepp as rsCurve
-from dataclasses import dataclass
-from common import SetQueue, GridMap, tic, toc, limit_angle
+from dataclasses import dataclass, field
+import time
 
-# 地图读取
-IMAGE_PATH = 'maze.jpg' # 原图路径
-THRESH = 172              # 图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
-MAP_HIGHT = 120            # 地图高度
-MAP_WIDTH = 120           # 地图宽度
-START = [5.0, 35.0, -math.pi/6]
-GOAL = [90.0, 80.0, math.pi/2]
+IMAGE_PATH = 'maze.jpg' 
+THRESH = 127              
+MAP_HIGHT = 200         
+MAP_WIDTH = 200       
+START =[100, 100, 0]
+GOAL = [135, 125, 0]
 
 class Car:
-    maxSteerAngle = 0.6
-    steerPresion = 10
-    wheelBase = 3.5
-    axleToFront = 4.5
-    axleToBack = 1
+    max_steer_angle = 0.6
+    steer_precision = 10
+    wheel_base = 3.5
+    axle2front = 4.5
+    axle2back = 1
     width = 2
-    motion_commands = None
-
-    @classmethod
-    def set_motion_commands(cls):
-        """Define motion commands"""
-        # Motion commands for a Non-Holonomic Robot like a Car (Trajectories using Steer Angle and Direction)
-        direction = 1
-        motion_commands = []
-        for i in np.arange(cls.maxSteerAngle, -(cls.maxSteerAngle + cls.maxSteerAngle/cls.steerPresion), -cls.maxSteerAngle/cls.steerPresion):
-            motion_commands.append([i, direction])
-            motion_commands.append([i, -direction])
-        cls.motion_commands = motion_commands
-
-Car.set_motion_commands()
-
-class Cost:
-    reverse = 10
-    directionChange = 300
-    steerAngle = 1
-    steerAngleChange = 5
-    hybridCost = 50
-
-class Map:
-    xyResolution: int = 1     # grid block length
-    yawResolution: float = np.deg2rad(15.0)  # grid block possible yaws
-    # s = [10, 10, np.deg2rad(90)]
-    # g = [25, 10, np.deg2rad(90)]
-    s = START # 起点 (x, y, yaw), y轴向下为正, yaw顺时针为正
-    g = GOAL 
-
+    reverse_cost = 30
+    dir_change_cost = 30
+    yaw_change_cost = 5
+    motion_commands =[[i, dir] for i in np.arange(max_steer_angle, -(max_steer_angle + \
+                    max_steer_angle/steer_precision), -max_steer_angle/steer_precision) for dir in [1, -1]]
     
-    def __init__(self,
-        img_path: str,
-        thresh: int,
-        high: int,
-        width: int):        
-        """提取栅格地图
-        Parameters
-        ----------
-        img_path : str
-            原图片路径
-        thresh : int
-            图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
-        high : int
-            栅格地图高度
-        width : int
-            栅格地图宽度
-        """
-        # 存储路径
-        self.__map_path = 'map.png' # 栅格地图路径
-        self.__path_path = 'path.png' # 路径规划结果路径
-
-        # 图像处理 #  NOTE cv2 按 HWC 存储图片
-        image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)                     # 读取原图 H,W,C
-        thresh, map_img = cv2.threshold(image, thresh, 255, cv2.THRESH_BINARY) # 地图二值化
-        map_img = cv2.resize(map_img, (width, high))                           # 设置地图尺寸
-        cv2.imwrite(self.__map_path, map_img)                                  # 存储二值地图
-
-        # 栅格地图属性
+class Map:
+    xy_resolution = 1     # grid block length
+    yaw_resolution = np.deg2rad(15.0)  # grid block possible yaws 
+    def __init__(self, img_path, thresh, high, width): 
+        image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)                     
+        thresh, map_img = cv2.threshold(image, thresh, 255, cv2.THRESH_BINARY) 
+        map_img = cv2.resize(map_img, (width, high))                               
         self.map_array = np.array(map_img)
-        """ndarray地图, H*W, 0代表障碍物"""
         self.high = high
-        """ndarray地图高度"""
         self.width = width
-        """ndarray地图宽度"""
-
-        self.obstacleX, self.obstacleY = [], []
-        
+        self.obstacle_x, self.obstacle_y = [], []
         self.generate_obstacles()
-
         # create a KDTree to represent obstacles
-        self.ObstacleKDTree = kd.KDTree([[x, y] for x, y in zip(self.obstacleX, self.obstacleY)])
+        self.ObstacleKDTree = kd.KDTree([[x, y] for x, y in zip(self.obstacle_x, self.obstacle_y)])
 
     def generate_obstacles(self):
         for i in range(self.width):
             for j in range(self.high):
                 if self.map_array[j][i] == 0:
-                    self.obstacleX.append(i)
-                    self.obstacleY.append(j)
-
-    @staticmethod
-    def grid_idx(*pos):
-        """Index (x,y) into map grid (x_idx, y_idx)"""
-        return (round(pos[0] / Map.xyResolution), round(pos[1] / Map.xyResolution))
+                    self.obstacle_x.append(i)
+                    self.obstacle_y.append(j)
     
     @staticmethod
     def config_idx(*args):
         """Index configuration (x, y, yaw) as map grid node"""
-        return (round(args[0] / Map.xyResolution), round(args[1] / Map.xyResolution), round(args[2] / Map.yawResolution))
+        return (round(args[0] / Map.xy_resolution), round(args[1] / Map.xy_resolution), round(args[2] / Map.yaw_resolution))
 
 map = Map(IMAGE_PATH, THRESH, MAP_HIGHT, MAP_WIDTH)
 
 @dataclass(eq=False)
-class Node:
+class HybridNode:
     x: float
     y: float
     yaw: float
-    parent: "Node" = None # 父节点指针
+    parent: "HybridNode" = None 
     dir: int = 1
     angle: float = 0
-    G: float = 0.        # G代价
-    cost: float = None   # F代价 = G + H
+    G: float = 0.        
+    F: float = None
     
     def __post_init__(self):
-        # Grid index
+        # Grid index, update F cost
         self.x_idx, self.y_idx, self.yaw_idx= Map.config_idx(self.x, self.y, self.yaw)
-        if self.cost is None:
-            self.cost = self.heuristic([self.x, self.y], map.g)
+        self.F = self.G + self.heuristic(GOAL)
     
-    def __call__(self, command, step):
+    def next_node(self, command, step):
         # Iterate next node
-        x, y, yaw = self.kinematic_simulate(command, step)
+        next_x, next_y, next_yaw = self.kinematic_simulate(command, step)
         angle, dir = command
-        G = self.G + self.heuristic([self.x, self.y], [x, y]) + self.simulatedPathCost(command)
-        return Node(x, y, yaw, parent=self, dir=dir, angle=angle, G=G)
+        G = self.G + self.heuristic([next_x, next_y]) + self.hybrid_cost(command)
+        return HybridNode(next_x, next_y, next_yaw, parent=self, dir=dir, angle=angle, G=G)
         
-    def __eq__(self, other: "Node"):
-        # 节点eq比较 -> node in list
+    def __eq__(self, other: "HybridNode"):
         return self.x_idx == other.x_idx and self.y_idx == other.y_idx and self.yaw_idx == other.yaw_idx
-        #return self.__hash__() == hash(other)
         
-    def __le__(self, other: "Node"):
-        # 代价<=比较 -> min(open_list)
-        return self.cost <= other.cost
+    def __le__(self, other: "HybridNode"):
+        return self.F <= other.F
     
-    def __lt__(self, other: "Node"):
-        # 代价<比较 -> min(open_list)
-        return self.cost < other.cost
+    def __lt__(self, other: "HybridNode"):
+        return self.F < other.F
     
     def __hash__(self) -> int:
-        # 节点hash比较 -> node in set
         return hash((self.x_idx, self.y_idx, self.yaw_idx))
-       
-    def update_cost(self, TARG = map.g):
-        """启发搜索, 计算启发值H并更新F值"""
-        H = self.heuristic([self.x, self.y], TARG)
-        self.cost = self.G + H
-        return H
 
     def is_end(self, err = 0.05):
-        """是否终点, 启发值H小于err"""
-        if self.cost - self.G < err:
+        if self.F - self.G < err:
             return True
         return False
 
     def is_collided(self):
+        # out of map?
         if 0 > self.x or self.x >= map.width or 0 > self.y or self.y >= map.high:
             return True
+        
+        # collides with obstacles?
         cos_ = math.cos(self.yaw)
         sin_ = math.sin(self.yaw)
-        car_len = (Car.axleToFront + Car.axleToBack)/2 + 1
-        dl = (Car.axleToFront - Car.axleToBack)/2
+        half_len = (Car.axle2front + Car.axle2back)/2 + 1
+        dl = (Car.axle2front - Car.axle2back)/2
         cx = self.x + dl * cos_
         cy = self.y + dl * sin_
-        pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], car_len)
+        pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], half_len)
         if pointsInObstacle:
             for p in pointsInObstacle:
-                xo = map.obstacleX[p] - cx
-                yo = map.obstacleY[p] - cy
+                xo = map.obstacle_x[p] - cx
+                yo = map.obstacle_y[p] - cy
                 dx = xo * cos_ + yo * sin_
                 dy = -xo * sin_ + yo * cos_
-                if abs(dx) < car_len and abs(dy) < Car.width / 2 + 1:
+                if abs(dx) < half_len and abs(dy) < Car.width / 2 + 1:
                     return True
         return False
-        
-    @staticmethod
-    def heuristic(P1, P2):
+    
+    def heuristic(self, tar):
         """Euclid Distance"""
-        return math.hypot(P1[0] - P2[0], P1[1] - P2[1])
+        return math.hypot(self.x - tar[0], self.y - tar[1])
     
     @staticmethod
     def wrap_angle(angle):
         return (angle + np.pi) % (2 * np.pi) - np.pi
     
-    def kinematic_simulate(self, motionCommand, step=0.8):
-        # Simulate node using given current Node and Motion Commands
-        x = self.x + motionCommand[1] * step * math.cos(self.yaw)
-        y = self.y + motionCommand[1] * step * math.sin(self.yaw)
-        yaw = self.wrap_angle(self.yaw + motionCommand[1] * step / Car.wheelBase * math.tan(motionCommand[0]))
+    def kinematic_simulate(self, command, step):
+        # Simulate node using given current HybridNode and Motion Commands
+        x = self.x + command[1] * step * math.cos(self.yaw)
+        y = self.y + command[1] * step * math.sin(self.yaw)
+        yaw = self.wrap_angle(self.yaw + command[1] * step / Car.wheel_base * math.tan(command[0]))
         return x, y, yaw
     
-    def simulatedPathCost(self, motionCommand):
+    def hybrid_cost(self, command):
         cost = 0
         # Distance cost
-        if motionCommand[1] == 1:
+        if command[1] == 1:
             cost += 1
         else:
-            cost += Cost.reverse
+            cost += Car.reverse_cost
         # Direction change cost
-        if self.dir != motionCommand[1]:
-            cost += Cost.directionChange
-        # Steering Angle Cost
-        cost += motionCommand[0] * Cost.steerAngle
+        if self.dir != command[1]:
+            cost += Car.dir_change_cost
         # Steering Angle change cost
-        cost += abs(motionCommand[0] - self.angle) * Cost.steerAngleChange
+        cost += abs(command[0] - self.angle) * Car.yaw_change_cost
         return cost
+    
+@dataclass
+class SetQueue:
+    queue: set[HybridNode] = field(default_factory=set)
+    def __bool__(self):
+        return bool(self.queue)
+    
+    def __contains__(self, item):
+        return item in self.queue
 
-def collision(traj):
-    carRadius = (Car.axleToFront + Car.axleToBack)/2 + 1
-    dl = (Car.axleToFront - Car.axleToBack)/2
-    for i in traj:
-        cx = i[0] + dl * math.cos(i[2])
-        cy = i[1] + dl * math.sin(i[2])
-        if cx < carRadius or cy < carRadius or cx > map.width-carRadius or cy > map.high-carRadius:
-            return True
-        pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], carRadius)
-        if not pointsInObstacle:
-            continue
+    def __len__(self):
+        return len(self.queue)
+    
+    def get(self):
+        node = min(self.queue)  # O(n)?
+        self.queue.remove(node) # O(1)
+        return node
+        
+    def put(self, node: HybridNode):
+        if node in self.queue:              # O(1)
+            qlist = list(self.queue)       
+            idx = qlist.index(node)         # O(n)
+            if node.F < qlist[idx].F:
+                self.queue.remove(node)     # O(1)
+                self.queue.add(node)       
+        else:
+            self.queue.add(node)            # O(1)
 
-        for p in pointsInObstacle:
-            xo = map.obstacleX[p] - cx
-            yo = map.obstacleY[p] - cy
-            dx = xo * math.cos(i[2]) + yo * math.sin(i[2])
-            dy = -xo * math.sin(i[2]) + yo * math.cos(i[2])
-
-            if abs(dx) < carRadius and abs(dy) < Car.width / 2 + 1:
-                return True
-
-    return False
-
-def reedsSheppNode(currentNode, goalNode):
-    # Get x, y, yaw of currentNode and goalNode
-    startX, startY, startYaw = currentNode.x, currentNode.y, currentNode.yaw
-    goalX, goalY, goalYaw = goalNode.x, goalNode.y, goalNode.yaw
-
-    # Instantaneous Radius of Curvature
-    radius = math.tan(Car.maxSteerAngle)/Car.wheelBase
-
+    def empty(self):
+        return len(self.queue) == 0
+    
+def reedsSheppNode(current_node, goal_node):
+   # Instantaneous Radius of Curvature
+    radius = math.tan(Car.max_steer_angle)/Car.wheel_base
     # Find all possible reeds-shepp paths between current and goal node
-    reedsSheppPaths = rsCurve.calc_all_paths(startX, startY, startYaw, goalX, goalY, goalYaw, radius, 1)
-
+    reedsSheppPaths = rsCurve.calc_all_paths(current_node.x, current_node.y, current_node.yaw, \
+                                             goal_node.x, goal_node.y, goal_node.yaw, radius, 1)
     # Check if reedsSheppPaths is empty
     if not reedsSheppPaths:
         return None
-
     # Find path with lowest cost considering non-holonomic constraints
     costQueue = heapdict()
     for path in reedsSheppPaths:
-        costQueue[path] = reedsSheppCost(currentNode, path)
-
+        costQueue[path] = reedsSheppCost(current_node, path)
     # Find first path in priority queue that is collision free
     while len(costQueue)!=0:
         path = costQueue.popitem()[0]
-        traj=[]
+        # traj=[]
         node_list = []
-        parent = currentNode
+        parent = current_node
         for k in range(len(path.x)):
-            traj.append([path.x[k],path.y[k],path.yaw[k]])
-            curr = Node(path.x[k],path.y[k],path.yaw[k], parent)
-            node_list.append(curr)
-            parent = curr
-        if not collision(traj):
-            node_list.append(Node(goalNode.x, goalNode.y, goalNode.yaw, parent))
-            return node_list
+            node = HybridNode(path.x[k],path.y[k],path.yaw[k], parent)
+            if node.is_collided():
+                return None
+            node_list.append(node)
+            parent = node
+        node_list.append(HybridNode(goal_node.x, goal_node.y, goal_node.yaw, parent))
+        return node_list
     return None
 
-def reedsSheppCost(currentNode, path):
-    # Previos Node Cost
-    cost = currentNode.G
+def reedsSheppCost(current_node, path):
+    # Previous Node Cost
+    cost = current_node.F
     # Distance cost
     for i in path.lengths:
         if i >= 0:
             cost += 1
         else:
-            cost += abs(i) * Cost.reverse
+            cost += abs(i) * Car.reverse_cost
     # Direction change cost
     for i in range(len(path.lengths)-1):
         if path.lengths[i] * path.lengths[i+1] < 0:
-            cost += Cost.directionChange
-    # Steering Angle Cost
-    for i in path.ctypes:
-        # Check types which are not straight line
-        if i!="S":
-            cost += Car.maxSteerAngle * Cost.steerAngle
+            cost += Car.dir_change_cost
     # Steering Angle change cost
     turnAngle=[0.0 for _ in range(len(path.ctypes))]
     for i in range(len(path.ctypes)):
         if path.ctypes[i] == "R":
-            turnAngle[i] = - Car.maxSteerAngle
+            turnAngle[i] = - Car.max_steer_angle
         if path.ctypes[i] == "WB":
-            turnAngle[i] = Car.maxSteerAngle
+            turnAngle[i] = Car.max_steer_angle
     for i in range(len(path.lengths)-1):
-        cost += abs(turnAngle[i+1] - turnAngle[i]) * Cost.steerAngleChange
+        cost += abs(turnAngle[i+1] - turnAngle[i]) * Car.yaw_change_cost
     return cost
-
 
 class HybridAStar:
     def __init__(self, move_step=4, step=0.8):
-
-        self.start = Node(*map.s) 
-        self.start.update_cost()
-        
-        # Error Check
-        self.end = Node(*map.g)
-        if self.start.is_collided():
-            raise ValueError(f"起点x坐标或y坐标在障碍物上")
-        if self.end.is_collided():
-            raise ValueError(f"终点x坐标或y坐标在障碍物上")
-       
-        self.reset(move_step, step)
-        
-    def reset(self, move_step, step):
-        """重置算法"""
+        self.start = HybridNode(*START)
         self.step = step
-        self.__reset_flag = False
         self.move_step = move_step
-        self.close_set = set()                    # 存储已经走过的位置及其G值 
-        self.open_queue = SetQueue()              # 存储当前位置周围可行的位置及其F值
-        self.path_list = []                       # 存储路径(CloseList里的数据无序)
+        self.close_set = set()                    
+        self.open_queue = SetQueue()              
+        self.path_list = []                       
         self.rSNode = None
+        # Error Check
+        self.end = HybridNode(*GOAL)
+        if self.start.is_collided():
+            raise ValueError(f"START on the obstacles!")
+        if self.end.is_collided():
+            raise ValueError(f"TARGET on the obstacles!")
 
-    def _update_open_list(self, curr: Node):
-        """open_list添加可行点"""
-        for angle, dir in Car.motion_commands:
-            # 更新节点
-            next_ = curr
+    def _update_open_list(self, curr: HybridNode):
+        for command in Car.motion_commands:
+            next_node = curr
             for _ in range(self.move_step):
-                next_ = next_([angle, dir], self.step) # x、y、yaw、G_cost、parent都更新了, F_cost未更新
-            # 新位置是否碰到障碍物
-            if next_.is_collided():
+                next_node = next_node.next_node(command, self.step) 
+            if next_node.is_collided():
                 continue
-            # 新位置是否在 CloseList 中
-            if next_ in self.close_set:
+            if next_node in self.close_set:
                 continue
-            # 更新F代价
-            H = next_.update_cost()
-            # open-list添加/更新结点
-            self.open_queue.put(next_)
-                
             
-    def __call__(self):
-        """A*路径搜索"""
-        assert not self.__reset_flag, "call之前需要reset"
-        print("搜索中\n")
-        # 初始化 OpenList
+            self.open_queue.put(next_node)
+    
+    @staticmethod
+    def tic(): 
+        if 'global_tic_time' not in globals():
+            global global_tic_time
+            global_tic_time = []
+        global_tic_time.append(time.time())
+
+    @staticmethod
+    def toc(name='', *, CN=True, digit=6): 
+        if 'global_tic_time' not in globals() or not global_tic_time:
+            print('no tic' if CN else 'tic not set')  
+            return
+        name = name+' ' if (name and not CN) else name
+        if CN:
+            print('%sprocessing %f s。\n' % (name, round(time.time() - global_tic_time.pop(), digit)))
+        else:
+            print('%sElapsed time is %f seconds.\n' % (name, round(time.time() - global_tic_time.pop(), digit)))
+                
+    def run(self):
+        """A* path search"""
+        print("Searching path...\n")
+        # Initialize OpenList
         self.open_queue.put(self.start)
-        # 正向搜索节点
-        tic()
+        # Start forward search
+        self.tic()
         while not self.open_queue.empty():
-            # 弹出 OpenList 代价 F 最小的点
-            curr: Node = self.open_queue.get()
-            # Get Reed-Shepp Node if available
+            # Pop the node with the minimum F cost from OpenList
+            curr: HybridNode = self.open_queue.get()
+            # Get Reed-Shepp node if available
             rSNode = reedsSheppNode(curr, self.end)
-            # Id Reeds-Shepp Path is found exit
+            # If Reed-Shepp path is found, exit
             if rSNode:
                 self.close_set = set()
                 for i in range(len(rSNode)):
                     self.close_set.add(rSNode[i])
                 curr = rSNode[-1]
                 break
-            # 更新 OpenList
+            # Update OpenList
             self._update_open_list(curr)
-            # 更新 CloseList
+            # Update CloseList
             self.close_set.add(curr)
-            # 结束迭代
+            # End iteration if the end is reached
             if curr.is_end():
                 break
-        print("路径搜索完成\n")
-        toc()
+        print("Done.\n")
+        self.toc()
 
-        # 节点组合成路径
+        # Combine nodes to form the path
         while curr.parent is not None:
             self.path_list.append(curr)
             curr = curr.parent
         self.path_list.reverse()
-            
-        # 需要重置
-        self.__reset_flag = True
-
         return self.path_list
 
-def drawCar(x, y, yaw, color='black'):
-    car = np.array([[-Car.axleToBack, -Car.axleToBack, Car.axleToFront, Car.axleToFront, -Car.axleToBack],
+def draw_car(ax, x, y, yaw, color='black'):
+    car = np.array([[-Car.axle2back, -Car.axle2back, Car.axle2front, Car.axle2front, -Car.axle2back],
                     [Car.width / 2, -Car.width / 2, -Car.width / 2, Car.width / 2, Car.width / 2]])
 
-    rotationZ = np.array([[math.cos(yaw), -math.sin(yaw)],
+    rotation_z = np.array([[math.cos(yaw), -math.sin(yaw)],
                      [math.sin(yaw), math.cos(yaw)]])
-    car = np.dot(rotationZ, car)
+    car = np.dot(rotation_z, car)
     car += np.array([[x], [y]])
-    plt.plot(car[0, :], car[1, :], color)
+    ax.plot(car[0, :], car[1, :], color)
 
-def main():
+def plot(x, y, yaw):
+    # Figure 1: Draw Animated Car
+    fig1 = plt.figure()
+    ax1 = fig1.add_subplot(111)
+    for _ in range(2):
+        for k in range(len(x)):
+            ax1.cla()
+            ax1.set_xlim(min(map.obstacle_x), max(map.obstacle_x)) 
+            ax1.set_ylim(min(map.obstacle_y), max(map.obstacle_y))
+            ax1.plot(map.obstacle_x, map.obstacle_y, "sk")
+            ax1.plot(x, y, linewidth=1.5, color='r', zorder=0)
+            draw_car(ax1, x[k], y[k], yaw[k])
+            ax1.arrow(x[k], y[k], 1 * math.cos(yaw[k]), 1 * math.sin(yaw[k]), width=0.1, color='c')
+            plt.pause(0.001)
+    ax1.set_title("Hybrid A* with RS curve")
 
-    # Run Hybrid A*
-    x = []
-    y = []
-    yaw = []
-    path = HybridAStar()()
-    for node in path:
-        x.append(node.x)
-        y.append(node.y)
-        yaw.append(node.yaw)
-    # x, y, yaw = run(s, g, map, plt)
+    # Figure 2: Draw Start, Goal Location Map and Path
+    fig2 = plt.figure()
+    ax2 = fig2.add_subplot(111)
+    ax2.arrow(START[0], START[1], math.cos(START[2]), math.sin(START[2]), width=0.1, color='g', label='Start')
+    ax2.arrow(GOAL[0], GOAL[1], math.cos(GOAL[2]), math.sin(GOAL[2]), width=0.1, color='b', label='Goal')
+    ax2.set_xlim(min(map.obstacle_x), max(map.obstacle_x)) 
+    ax2.set_ylim(min(map.obstacle_y), max(map.obstacle_y))
+    ax2.plot(map.obstacle_x, map.obstacle_y, "sk", label='Obstacles')
+    ax2.plot(x, y, linewidth=2, color='r', zorder=0, label='Path')
+    ax2.set_title("Hybrid A* with RS curve")
+    ax2.legend()
 
-    # Draw Start, Goal Location Map and Path
-    # plt.arrow(map.s[0], map.s[1], 1*math.cos(map.s[2]), 1*math.sin(map.s[2]), width=.1)
-    # plt.arrow(map.g[0], map.g[1], 1*math.cos(map.g[2]), 1*math.sin(map.g[2]), width=.1)
-    # plt.xlim(min(map.obstacleX), max(map.obstacleX)) 
-    # plt.ylim(min(map.obstacleY), max(map.obstacleY))
-    # plt.plot(map.obstacleX, map.obstacleY, "sk")
-    # plt.plot(x, y, linewidth=2, color='r', zorder=0)
-    # plt.title("Hybrid A*")
-
-
-    # Draw Path, Map and Car Footprint
-    plt.plot(x, y, linewidth=1.5, color='r', zorder=0)
-    plt.plot(map.obstacleX, map.obstacleY, "sk")
+    # Figure 3: Draw Path, Map and Car Footprint
+    fig3 = plt.figure()
+    ax3 = fig3.add_subplot(111)
+    ax3.plot(x, y, linewidth=1.5, color='r', zorder=0, label='Path')
+    ax3.plot(map.obstacle_x, map.obstacle_y, "sk", label='Obstacles')
     for k in np.arange(0, len(x), 2):
-        plt.xlim(0, map.width) 
-        plt.ylim(0, map.high)
-        drawCar(x[k], y[k], yaw[k])
-        plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
-        plt.title("Hybrid A*")
-
-
-    # MAP.show_path(x,y,yaw)
-
-
-    # Draw Animated Car
-    # for k in range(len(x)):
-    #     plt.cla()
-    #     plt.xlim(min(map.obstacleX), max(map.obstacleX)) 
-    #     plt.ylim(min(map.obstacleY), max(map.obstacleY))
-    #     plt.plot(map.obstacleX, map.obstacleY, "sk")
-    #     plt.plot(x, y, linewidth=1.5, color='r', zorder=0)
-    #     drawCar(x[k], y[k], yaw[k])
-    #     plt.arrow(x[k], y[k], 1*math.cos(yaw[k]), 1*math.sin(yaw[k]), width=.1)
-    #     plt.title("Hybrid A*")
-    #     plt.pause(0.001)
-    
+        ax3.set_xlim(0, map.width) 
+        ax3.set_ylim(0, map.high)
+        draw_car(ax3, x[k], y[k], yaw[k])
+        ax3.arrow(x[k], y[k], 1 * math.cos(yaw[k]), 1 * math.sin(yaw[k]), width=0.1, color='c')
+    ax3.set_title("Hybrid A* with RS curve")
+    ax3.legend()
     plt.show()
 
 if __name__ == '__main__':
-    main()
+    # Run Hybrid A*
+    x, y, yaw = zip(*[(node.x, node.y, node.yaw) for node in HybridAStar().run()])
+    plot(x, y, yaw) 
