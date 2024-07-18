@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from common import SetQueue, GridMap, tic, toc, limit_angle
 
 # 地图读取
-IMAGE_PATH = 'image1.jpg' # 原图路径
+IMAGE_PATH = 'maze.jpg' # 原图路径
 THRESH = 172              # 图片二值化阈值, 大于阈值的部分被置为255, 小于部分被置为0
 MAP_HIGHT = 120            # 地图高度
 MAP_WIDTH = 120           # 地图宽度
+START = [5.0, 35.0, -math.pi/6]
+GOAL = [90.0, 80.0, math.pi/2]
 
 class Car:
     maxSteerAngle = 0.6
@@ -41,7 +43,7 @@ Car.set_motion_commands()
 
 class Cost:
     reverse = 10
-    directionChange = 150
+    directionChange = 300
     steerAngle = 1
     steerAngleChange = 5
     hybridCost = 50
@@ -51,8 +53,8 @@ class Map:
     yawResolution: float = np.deg2rad(15.0)  # grid block possible yaws
     # s = [10, 10, np.deg2rad(90)]
     # g = [25, 10, np.deg2rad(90)]
-    s = [5.0, 35.0, -math.pi/6] # 起点 (x, y, yaw), y轴向下为正, yaw顺时针为正
-    g = [60.0, 80.0, math.pi/2] 
+    s = START # 起点 (x, y, yaw), y轴向下为正, yaw顺时针为正
+    g = GOAL 
 
     
     def __init__(self,
@@ -311,7 +313,7 @@ def reedsSheppCost(currentNode, path):
 
 
 class HybridAStar:
-    def __init__(self, move_step=4, step=1):
+    def __init__(self, move_step=4, step=0.8):
 
         self.start = Node(*map.s) 
         self.start.update_cost()
