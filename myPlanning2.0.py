@@ -7,55 +7,74 @@ import scipy.spatial as kd
 import reeds_shepp as rsCurve
 from dataclasses import dataclass, field
 import time
+from matplotlib.ticker import FuncFormatter
 
-IMAGE_PATH = 'maze.jpg' 
+IMAGE_PATH = 'map.jpg' 
 THRESH = 127              
-MAP_HIGHT = 400         
-MAP_WIDTH = 400       
-START =[200, 200, 0]
-GOAL = [270, 250, 0]
+MAP_SIZE = 10
+IMG_SIZE = 400
+START =[6.8, 1, np.pi/2]
+GOAL = [3, 6.5, np.pi/2]
 
 class Car:
-    max_steer_angle = 0.6
-    steer_precision = 10
-    wheel_base = 3.5
-    axle2front = 4.5
-    axle2back = 1
-    width = 2
+    max_steer_angle = 0.52
+    steer_precision = 5
+    wheel_base = 0.6
+    axle2front = 0.7
+    axle2back = 0.2
+    width = 0.31
     reverse_cost = 30
     dir_change_cost = 30
     yaw_change_cost = 5
+    half_len = (axle2front + axle2back)/2
+    half_wid = width / 2
+    dl = (axle2front - axle2back)/2
     motion_commands =[[i, dir] for i in np.arange(max_steer_angle, -(max_steer_angle + \
                     max_steer_angle/steer_precision), -max_steer_angle/steer_precision) for dir in [1, -1]]
     
+STEP_SIZE = Car.axle2back
+
 class Map:
-    xy_resolution = 2    # grid block length
-    yaw_resolution = np.deg2rad(15.0)  # grid block possible yaws 
-    def __init__(self, img_path, thresh, high, width): 
-        image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)                     
+    def __init__(self, img_path, thresh, size, img_size, yaw_resolution=np.deg2rad(5.0)): 
+        
+        self.yaw_resolution = yaw_resolution  # grid block possible yaws
+        image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         thresh, map_img = cv2.threshold(image, thresh, 255, cv2.THRESH_BINARY) 
-        map_img = cv2.resize(map_img, (width, high))                               
+        map_img = cv2.resize(map_img, (img_size, img_size))
+        map_img = map_img[::-1]                              
         self.map_array = np.array(map_img)
-        self.high = high
-        self.width = width
+        self.img_size = self.map_array.shape[0]
+        self.size = size
+        self.xy_resolution = self.size / self.img_size  # grid block length
         self.obstacle_x, self.obstacle_y = [], []
         self.generate_obstacles()
+        
         # create a KDTree to represent obstacles
-        self.ObstacleKDTree = kd.KDTree([[x, y] for x, y in zip(self.obstacle_x, self.obstacle_y)])
+        self.ObstacleKDTree = kd.KDTree([[x*self.xy_resolution, y*self.xy_resolution] for x, y in zip(self.obstacle_x, self.obstacle_y)])
 
-    def generate_obstacles(self):
-        for i in range(self.width):
-            for j in range(self.high):
-                if self.map_array[j][i] == 0:
+    def generate_obstacles(self, downsample_factor=2):
+        # Use the Sobel operator to detect edges in the binary obstacle map
+        sobelx = cv2.Sobel(self.map_array, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(self.map_array, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Calculate gradient magnitude
+        gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+        
+        # Normalize the gradient to binary (edges = 1, no edge = 0)
+        gradient_magnitude = (gradient_magnitude > 0).astype(np.uint8)
+        
+        # Loop through the map array and add only surface obstacle pixels to the KDTree
+        for i in range(0, self.img_size, downsample_factor):
+            for j in range(0, self.img_size, downsample_factor):
+                if gradient_magnitude[j][i] > 0:  # Only consider surface pixels
                     self.obstacle_x.append(i)
                     self.obstacle_y.append(j)
-    
-    @staticmethod
-    def config_idx(*args):
-        """Index configuration (x, y, yaw) as map grid node"""
-        return (round(args[0] / Map.xy_resolution), round(args[1] / Map.xy_resolution), round(args[2] / Map.yaw_resolution))
 
-map = Map(IMAGE_PATH, THRESH, MAP_HIGHT, MAP_WIDTH)
+    def config_idx(self, *args):
+        """Index configuration (x, y, yaw) as map grid node"""
+        return (round(args[0] / self.xy_resolution), round(args[1] / self.xy_resolution), round(args[2] / self.yaw_resolution))
+
+map = Map(IMAGE_PATH, THRESH, MAP_SIZE, IMG_SIZE)
 
 @dataclass(eq=False)
 class HybridNode:
@@ -70,7 +89,7 @@ class HybridNode:
     
     def __post_init__(self):
         # Grid index, update F cost
-        self.x_idx, self.y_idx, self.yaw_idx= Map.config_idx(self.x, self.y, self.yaw)
+        self.x_idx, self.y_idx, self.yaw_idx= map.config_idx(self.x, self.y, self.yaw)
         self.F = self.G + self.heuristic(GOAL)
     
     def next_node(self, command, step):
@@ -81,10 +100,7 @@ class HybridNode:
         return HybridNode(next_x, next_y, next_yaw, parent=self, dir=dir, angle=angle, G=G)
         
     def __eq__(self, other: "HybridNode"):
-        return self.x_idx == other.x_idx and self.y_idx == other.y_idx and self.yaw_idx == other.yaw_idx
-        
-    def __le__(self, other: "HybridNode"):
-        return self.F <= other.F
+        return self.x_idx == other.x_idx and self.y_idx == other.y_idx #and self.yaw_idx == other.yaw_idx
     
     def __lt__(self, other: "HybridNode"):
         return self.F < other.F
@@ -92,34 +108,28 @@ class HybridNode:
     def __hash__(self) -> int:
         return hash((self.x_idx, self.y_idx, self.yaw_idx))
 
-    def is_end(self, err = 0.05):
-        if self.F - self.G < err:
-            return True
-        return False
-
     def is_collided(self):
         # out of map?
-        if 0 > self.x or self.x >= map.width or 0 > self.y or self.y >= map.high:
+        if 0 > self.x or self.x >= map.size or 0 > self.y or self.y >= map.size:
             return True
         
         # collides with obstacles?
         cos_ = math.cos(self.yaw)
         sin_ = math.sin(self.yaw)
-        half_len = (Car.axle2front + Car.axle2back)/2 + 1
-        # print(half_len)
-        dl = (Car.axle2front - Car.axle2back)/2
-        cx = self.x + dl * cos_
-        cy = self.y + dl * sin_
-        pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], half_len)
+
+        cx = self.x + Car.dl * cos_
+        cy = self.y + Car.dl * sin_
+        pointsInObstacle = map.ObstacleKDTree.query_ball_point([cx, cy], Car.half_len+Car.half_wid)
         if pointsInObstacle:
             for p in pointsInObstacle:
-                xo = map.obstacle_x[p] - cx
-                yo = map.obstacle_y[p] - cy
+                xo = map.obstacle_x[p]*map.xy_resolution - cx
+                yo = map.obstacle_y[p]*map.xy_resolution - cy
                 dx = xo * cos_ + yo * sin_
                 dy = -xo * sin_ + yo * cos_
-                if abs(dx) < half_len and abs(dy) < Car.width / 2 + 1:
+                if abs(dx) < Car.half_len and abs(dy) < Car.half_wid+0.05:
                     return True
         return False
+ 
     
     def heuristic(self, tar):
         """Euclid Distance"""
@@ -150,42 +160,12 @@ class HybridNode:
         cost += abs(command[0] - self.angle) * Car.yaw_change_cost
         return cost
     
-@dataclass
-class SetQueue:
-    queue: set[HybridNode] = field(default_factory=set)
-    def __bool__(self):
-        return bool(self.queue)
-    
-    def __contains__(self, item):
-        return item in self.queue
-
-    def __len__(self):
-        return len(self.queue)
-    
-    def get(self):
-        node = min(self.queue)  # O(n)?
-        self.queue.remove(node) # O(1)
-        return node
-        
-    def put(self, node: HybridNode):
-        if node in self.queue:              # O(1)
-            qlist = list(self.queue)       
-            idx = qlist.index(node)         # O(n)
-            if node.F < qlist[idx].F:
-                self.queue.remove(node)     # O(1)
-                self.queue.add(node)       
-        else:
-            self.queue.add(node)            # O(1)
-
-    def empty(self):
-        return len(self.queue) == 0
-    
 def reedsSheppNode(current_node, goal_node):
    # Instantaneous Radius of Curvature
-    radius = math.tan(Car.max_steer_angle)/Car.wheel_base
+    radius = math.tan(Car.max_steer_angle)/Car.wheel_base*1.2
     # Find all possible reeds-shepp paths between current and goal node
     reedsSheppPaths = rsCurve.calc_all_paths(current_node.x, current_node.y, current_node.yaw, \
-                                             goal_node.x, goal_node.y, goal_node.yaw, radius, 1)
+                                             goal_node.x, goal_node.y, goal_node.yaw, radius, step_size=STEP_SIZE)
     # Check if reedsSheppPaths is empty
     if not reedsSheppPaths:
         return None
@@ -196,7 +176,6 @@ def reedsSheppNode(current_node, goal_node):
     # Find first path in priority queue that is collision free
     while len(costQueue)!=0:
         path = costQueue.popitem()[0]
-        # traj=[]
         node_list = []
         parent = current_node
         for k in range(len(path.x)):
@@ -234,14 +213,13 @@ def reedsSheppCost(current_node, path):
     return cost
 
 class HybridAStar:
-    def __init__(self, move_step=3, step=1):
+    def __init__(self):
         self.start = HybridNode(*START)
-        self.step = step
-        self.move_step = move_step
         self.close_set = set()                    
-        self.open_queue = SetQueue()              
+        self.open_queue = heapdict()            
         self.path_list = []                       
         self.rSNode = None
+        self.closed_list_nodes = []  # 存储所有 closed list 中的节点
         # Error Check
         self.end = HybridNode(*GOAL)
         if self.start.is_collided():
@@ -250,16 +228,30 @@ class HybridAStar:
             raise ValueError(f"TARGET on the obstacles!")
 
     def _update_open_list(self, curr: HybridNode):
+        # Calculate distance to nearest obstacle
+        dist_to_nearest_obstacle, _ = map.ObstacleKDTree.query([curr.x, curr.y])
+        
+        # Adjust move_step based on distance to obstacles
+        step = STEP_SIZE
+        if dist_to_nearest_obstacle < STEP_SIZE:
+            move_step = 1  # Decrease move_step if close to obstacles
+            step = STEP_SIZE/2
+        elif dist_to_nearest_obstacle > STEP_SIZE*4:
+            move_step = 2  # Increase move_step if far from obstacles
+            step = STEP_SIZE*2
+        else:
+            move_step = 2  # Default move_step
+        
         for command in Car.motion_commands:
             next_node = curr
-            for _ in range(self.move_step):
-                next_node = next_node.next_node(command, self.step) 
+            for _ in range(move_step):
+                next_node = next_node.next_node(command, step)
             if next_node.is_collided():
                 continue
             if next_node in self.close_set:
                 continue
             
-            self.open_queue.put(next_node)
+            self.open_queue[next_node] = next_node.F
     
     @staticmethod
     def tic(): 
@@ -283,12 +275,14 @@ class HybridAStar:
         """A* path search"""
         print("Searching path...\n")
         # Initialize OpenList
-        self.open_queue.put(self.start)
+        self.open_queue[self.start] = self.start.F
         # Start forward search
         self.tic()
-        while not self.open_queue.empty():
+        while self.open_queue:
             # Pop the node with the minimum F cost from OpenList
-            curr: HybridNode = self.open_queue.get()
+            curr: HybridNode = self.open_queue.popitem()[0]
+            self.closed_list_nodes.append(curr)  # 保存当前节点到 closed list
+
             # Get Reed-Shepp node if available
             rSNode = reedsSheppNode(curr, self.end)
             # If Reed-Shepp path is found, exit
@@ -302,9 +296,6 @@ class HybridAStar:
             self._update_open_list(curr)
             # Update CloseList
             self.close_set.add(curr)
-            # End iteration if the end is reached
-            if curr.is_end():
-                break
         print("Done.\n")
         self.toc()
 
@@ -313,7 +304,7 @@ class HybridAStar:
             self.path_list.append(curr)
             curr = curr.parent
         self.path_list.reverse()
-        return self.path_list
+        return self.path_list, self.closed_list_nodes  
 
 def draw_car(ax, x, y, yaw, color='black'):
     car = np.array([[-Car.axle2back, -Car.axle2back, Car.axle2front, Car.axle2front, -Car.axle2back],
@@ -322,52 +313,70 @@ def draw_car(ax, x, y, yaw, color='black'):
     rotation_z = np.array([[math.cos(yaw), -math.sin(yaw)],
                      [math.sin(yaw), math.cos(yaw)]])
     car = np.dot(rotation_z, car)
-    car += np.array([[x], [y]])
+    car = np.array([[x], [y]]) + np.round(car / map.xy_resolution)
     ax.plot(car[0, :], car[1, :], color)
 
-def plot(x, y, yaw):
+def scale(x, pos):
+        return '{:.1f}'.format(x*map.xy_resolution)
+
+def plot(x, y, yaw, closed_list_nodes):
     # Figure 1: Draw Animated Car
-    # fig1 = plt.figure()
-    # ax1 = fig1.add_subplot(111)
-    # for _ in range(1):
-    #     for k in range(len(x)):
-    #         ax1.cla()
-    #         ax1.set_xlim(min(map.obstacle_x), max(map.obstacle_x)) 
-    #         ax1.set_ylim(min(map.obstacle_y), max(map.obstacle_y))
-    #         ax1.plot(map.obstacle_x, map.obstacle_y, "sk")
-    #         ax1.plot(x, y, linewidth=1.5, color='r', zorder=0)
-    #         draw_car(ax1, x[k], y[k], yaw[k])
-    #         ax1.arrow(x[k], y[k], 1 * math.cos(yaw[k]), 1 * math.sin(yaw[k]), width=0.1, color='c')
-    #         plt.pause(0.001)
-    # ax1.set_title("Hybrid A* with RS curve")
+    fig1 = plt.figure()
+    ax1 = fig1.add_subplot(111)
+    for show_time in range(1):
+        for k in range(len(x)):
+            ax1.cla()
+            ax1.set_xlim(0, map.img_size) 
+            ax1.xaxis.set_major_formatter(FuncFormatter(scale))
+            ax1.set_ylim(0, map.img_size)
+            ax1.yaxis.set_major_formatter(FuncFormatter(scale))
+            ax1.plot(map.obstacle_x, map.obstacle_y, "sk")
+            ax1.plot(x, y, linewidth=0.02/map.xy_resolution, color='r', zorder=0)
+            draw_car(ax1, x[k], y[k], yaw[k])
+            ax1.arrow(x[k], y[k], math.cos(yaw[k])/map.xy_resolution/2, math.sin(yaw[k])/map.xy_resolution/2, color='c')
+            plt.pause(0.001)
+    ax1.set_title("Hybrid A* with RS curve")
 
     # Figure 2: Draw Start, Goal Location Map and Path
     fig2 = plt.figure()
     ax2 = fig2.add_subplot(111)
-    ax2.arrow(START[0], START[1], math.cos(START[2]), math.sin(START[2]), width=0.1, color='g', label='Start')
-    ax2.arrow(GOAL[0], GOAL[1], math.cos(GOAL[2]), math.sin(GOAL[2]), width=0.1, color='b', label='Goal')
-    ax2.set_xlim(min(map.obstacle_x), max(map.obstacle_x)) 
-    ax2.set_ylim(min(map.obstacle_y), max(map.obstacle_y))
+    ax2.arrow(np.round(START[0]/map.xy_resolution), np.round(START[1]/map.xy_resolution), math.cos(START[2])/map.xy_resolution/2, math.sin(START[2])/map.xy_resolution/2, width=0.02/map.xy_resolution, color='g', label='Start')
+    ax2.arrow(np.round(GOAL[0]/map.xy_resolution), np.round(GOAL[1]/map.xy_resolution), math.cos(GOAL[2])/map.xy_resolution/2, math.sin(GOAL[2])/map.xy_resolution/2, width=0.02/map.xy_resolution, color='b', label='Goal')
+    ax2.set_xlim(0, map.img_size) 
+    ax2.xaxis.set_major_formatter(FuncFormatter(scale))
+    ax2.set_ylim(0, map.img_size)
+    ax2.yaxis.set_major_formatter(FuncFormatter(scale))
     ax2.plot(map.obstacle_x, map.obstacle_y, "sk", label='Obstacles')
     ax2.plot(x, y, linewidth=2, color='r', zorder=0, label='Path')
+    
+    for node in closed_list_nodes:
+        ax2.arrow(np.round(node.x/map.xy_resolution), np.round(node.y/map.xy_resolution),
+                  math.cos(node.yaw)/map.xy_resolution/4, math.sin(node.yaw)/map.xy_resolution/4,
+                  color='green', width=0.0001/map.xy_resolution, zorder=0)
+        
     ax2.set_title("Hybrid A* with RS curve")
     ax2.legend()
+    plt.show()
 
     # Figure 3: Draw Path, Map and Car Footprint
     fig3 = plt.figure()
     ax3 = fig3.add_subplot(111)
     ax3.plot(x, y, linewidth=1.5, color='r', zorder=0, label='Path')
     ax3.plot(map.obstacle_x, map.obstacle_y, "sk", label='Obstacles')
+    ax3.set_xlim(0, map.img_size) 
+    ax3.xaxis.set_major_formatter(FuncFormatter(scale))
+    ax3.set_ylim(0, map.img_size)
+    ax3.yaxis.set_major_formatter(FuncFormatter(scale))
     for k in np.arange(0, len(x), 2):
-        ax3.set_xlim(0, map.width) 
-        ax3.set_ylim(0, map.high)
         draw_car(ax3, x[k], y[k], yaw[k])
-        ax3.arrow(x[k], y[k], 1 * math.cos(yaw[k]), 1 * math.sin(yaw[k]), width=0.1, color='c')
+        ax3.arrow(x[k], y[k], math.cos(yaw[k])/map.xy_resolution/2, math.sin(yaw[k])/map.xy_resolution/2, width=0.02/map.xy_resolution, color='c')
     ax3.set_title("Hybrid A* with RS curve")
     ax3.legend()
     plt.show()
 
 if __name__ == '__main__':
     # Run Hybrid A*
-    x, y, yaw = zip(*[(node.x, node.y, node.yaw) for node in HybridAStar().run()])
-    plot(x, y, yaw) 
+    path_list, closed_list_nodes = HybridAStar().run()
+    print(closed_list_nodes[0])
+    x, y, yaw = zip(*[(np.round(node.x / map.xy_resolution), np.round(node.y / map.xy_resolution), node.yaw) for node in path_list])
+    plot(x, y, yaw, closed_list_nodes)

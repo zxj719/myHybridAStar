@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import draw
 
 # parameters initiation
-STEP_SIZE = 0.2
+STEP_SIZE = 0.5
 MAX_LENGTH = 1000.0
 PI = math.pi
 
@@ -21,7 +21,7 @@ class PATH:
         self.directions = directions  # forward: 1, backward:-1
 
 
-def calc_optimal_path(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=STEP_SIZE):
+def calc_optimal_path(sx, sy, syaw, gx, gy, gyaw, maxc, step_size):
     paths = calc_all_paths(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=step_size)
 
     minL = paths[0].L
@@ -34,7 +34,7 @@ def calc_optimal_path(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=STEP_SIZE):
     return paths[mini]
 
 
-def calc_all_paths(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=STEP_SIZE):
+def calc_all_paths(sx, sy, syaw, gx, gy, gyaw, maxc, step_size):
     q0 = [sx, sy, syaw]
     q1 = [gx, gy, gyaw]
 
@@ -643,7 +643,7 @@ def calc_curvature(x, y, yaw, directions):
     return c, ds
 
 
-def check_path(sx, sy, syaw, gx, gy, gyaw, maxc):
+def check_path(sx, sy, syaw, gx, gy, gyaw, maxc, step_size):
     paths = calc_all_paths(sx, sy, syaw, gx, gy, gyaw, maxc)
 
     assert len(paths) >= 1
@@ -662,7 +662,7 @@ def check_path(sx, sy, syaw, gx, gy, gyaw, maxc):
                                np.diff(path.y[0:len(path.y) - 1]))]
 
         for i in range(len(d)):
-            assert abs(d[i] - STEP_SIZE) <= 0.001
+            assert abs(d[i] - step_size) <= 0.001
 
 
 def main():
